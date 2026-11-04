@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const TITLE: &str = "Nspire PDF";
@@ -18,6 +18,7 @@ const LINE: Color32 = Color32::from_gray(46);
 const SURFACE: Color32 = Color32::from_gray(19);
 const BACKGROUND: Color32 = Color32::from_gray(9);
 const ERROR: Color32 = Color32::from_rgb(255, 161, 152);
+const SUCCESS: Color32 = Color32::from_rgb(106, 218, 137);
 const SOURCE_ROW_HEIGHT: f32 = 30.0;
 
 fn main() -> eframe::Result {
@@ -58,10 +59,52 @@ enum Status {
     Idle,
     Working {
         receiver: Receiver<WorkerUpdate>,
-        stage: ConversionStage,
+        progress: ConversionProgress,
     },
-    Done(PathBuf, Stats),
+    Done {
+        path: PathBuf,
+        stats: Stats,
+        finished_at: Instant,
+        open_error: Option<String>,
+    },
     Failed(String),
+}
+
+struct ConversionProgress {
+    stage: ConversionStage,
+    stage_started: Instant,
+    last_frame: Instant,
+    fill: f32,
+}
+
+impl ConversionProgress {
+    fn new(now: Instant) -> Self {
+        Self {
+            stage: ConversionStage::Reading,
+            stage_started: now,
+            last_frame: now,
+            fill: 0.0,
+        }
+    }
+
+    fn enter(&mut self, stage: ConversionStage, now: Instant) {
+        self.stage = stage;
+        self.stage_started = now;
+    }
+
+    fn advance(&mut self, now: Instant) -> f32 {
+        let elapsed = now.duration_since(self.stage_started).as_secs_f32();
+        // Tectonic reports no fraction complete. Reserve the end of the bar for the save.
+        let estimate = match self.stage {
+            ConversionStage::Reading => 0.18 * elapsed / (elapsed + 0.8),
+            ConversionStage::Typesetting => 0.18 + 0.77 * elapsed / (elapsed + 7.0),
+            ConversionStage::Saving => 0.98,
+        };
+        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        self.fill += (estimate - self.fill).max(0.0) * (1.0 - (-dt / 0.22).exp());
+        self.fill
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -90,7 +133,7 @@ impl Converter {
                 self.status = Status::Idle;
             }
         }
-        if !valid {
+        if !valid && !matches!(self.status, Status::Done { .. }) {
             self.status =
                 Status::Failed("Choose a TI-Nspire Notes file with a .tns extension.".into());
         }
@@ -186,20 +229,25 @@ impl Converter {
         self.status = match worker {
             Ok(_) => Status::Working {
                 receiver: receive,
-                stage: ConversionStage::Reading,
+                progress: ConversionProgress::new(Instant::now()),
             },
             Err(error) => Status::Failed(format!("Could not start conversion. {error}")),
         };
     }
 
     fn update_status(&mut self) {
-        while let Status::Working { receiver, stage } = &mut self.status {
+        while let Status::Working { receiver, progress } = &mut self.status {
             self.status = match receiver.try_recv() {
                 Ok(WorkerUpdate::Progress(current)) => {
-                    *stage = current;
+                    progress.enter(current, Instant::now());
                     continue;
                 }
-                Ok(WorkerUpdate::Finished(Ok((path, stats)))) => Status::Done(path, stats),
+                Ok(WorkerUpdate::Finished(Ok((path, stats)))) => Status::Done {
+                    path,
+                    stats,
+                    finished_at: Instant::now(),
+                    open_error: None,
+                },
                 Ok(WorkerUpdate::Finished(Err(error))) => Status::Failed(error),
                 Err(TryRecvError::Disconnected) => {
                     Status::Failed("The converter stopped unexpectedly.".into())
@@ -398,7 +446,7 @@ impl Converter {
                 }
             });
         let path = match &self.status {
-            Status::Done(path, _) => Some(path.clone()),
+            Status::Done { path, .. } => Some(path.clone()),
             _ => self.suggested_destination(),
         };
         if let Some(path) = path {
@@ -409,18 +457,22 @@ impl Converter {
     }
 
     fn status_ui(&mut self, ui: &mut egui::Ui) {
-        match &self.status {
+        match &mut self.status {
             Status::Idle => {
                 ui.label(
                     RichText::new("A4 PDF with selectable text and typeset math.").color(MUTED),
                 );
             }
             Status::Working { .. } => {}
-            Status::Done(path, stats) => {
+            Status::Done {
+                path,
+                stats,
+                open_error,
+                ..
+            } => {
                 let clicked = ui
                     .horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("PDF saved").strong());
                             ui.label(
                                 RichText::new(format!(
                                     "{} Notes sections · {} math boxes · {} images",
@@ -435,13 +487,17 @@ impl Converter {
                         .inner
                     })
                     .inner;
-                if clicked && let Err(error) = open::that(path) {
-                    self.status =
-                        Status::Failed(format!("PDF saved, but it could not be opened. {error}"));
+                if clicked {
+                    *open_error = open::that(&*path)
+                        .err()
+                        .map(|error| format!("PDF saved, but it could not be opened. {error}"));
+                }
+                if let Some(error) = open_error {
+                    ui.label(RichText::new(error.as_str()).color(ERROR));
                 }
             }
             Status::Failed(error) => {
-                ui.label(RichText::new(error).color(ERROR));
+                ui.label(RichText::new(error.as_str()).color(ERROR));
             }
         }
     }
@@ -450,11 +506,13 @@ impl Converter {
 impl eframe::App for Converter {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.update_status();
-        let stage = match self.status {
-            Status::Working { stage, .. } => Some(stage),
+        let progress = match &mut self.status {
+            Status::Working { progress, .. } => {
+                Some((progress.stage, progress.advance(Instant::now())))
+            }
             _ => None,
         };
-        let working = stage.is_some();
+        let working = progress.is_some();
         let file_hover = !working
             && ctx.input(|input| {
                 self.accept_drops(&input.raw.dropped_files);
@@ -481,10 +539,15 @@ impl eframe::App for Converter {
                         if self.style != previous {
                             self.status = Status::Idle;
                         }
-                        ui.checkbox(
-                            &mut self.show_widget_placeholders,
-                            "Mark skipped app panes in PDF",
-                        );
+                        if ui
+                            .checkbox(
+                                &mut self.show_widget_placeholders,
+                                "Mark skipped app panes in PDF",
+                            )
+                            .changed()
+                        {
+                            self.status = Status::Idle;
+                        }
                         ui.add_space(9.0);
                         if source_target(ui, !self.sources.is_empty(), file_hover)
                             && let Some(paths) = FileDialog::new()
@@ -502,7 +565,11 @@ impl eframe::App for Converter {
                     });
                     ui.add_space(17.0);
                     let ready = !working && self.source_drag.is_none() && !self.sources.is_empty();
-                    if convert_button(ui, ready, stage)
+                    let converted = match self.status {
+                        Status::Done { finished_at, .. } => Some(finished_at.elapsed()),
+                        _ => None,
+                    };
+                    if convert_button(ui, ready, progress, converted)
                         && let Some(destination) = self.choose_destination()
                     {
                         self.start(ctx, destination);
@@ -540,14 +607,37 @@ fn move_button(ui: &mut egui::Ui, enabled: bool, up: bool) -> bool {
     response.on_hover_text(label).clicked()
 }
 
-fn convert_button(ui: &mut egui::Ui, ready: bool, stage: Option<ConversionStage>) -> bool {
-    let label = match stage {
+fn convert_button(
+    ui: &mut egui::Ui,
+    ready: bool,
+    progress: Option<(ConversionStage, f32)>,
+    converted: Option<Duration>,
+) -> bool {
+    let size = egui::vec2(ui.available_width(), 38.0);
+    if let Some(elapsed) = converted {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Converted"));
+        let painter = ui.painter();
+        painter.rect_filled(rect, 8, LINE);
+        let label = painter.layout_no_wrap(
+            "Converted".into(),
+            egui::TextStyle::Button.resolve(ui.style()),
+            MUTED,
+        );
+        let icon = rect.center() - egui::vec2((label.size().x + 7.0) / 2.0, 0.0);
+        paint_conversion_check(ui, icon, elapsed);
+        let origin = icon + egui::vec2(13.0, -label.size().y / 2.0);
+        painter.galley(origin, label, MUTED);
+        return false;
+    }
+    let label = match progress.map(|(stage, _)| stage) {
         None => "Convert to PDF",
         Some(ConversionStage::Reading) => "Reading notes…",
         Some(ConversionStage::Typesetting) => "Typesetting PDF…",
         Some(ConversionStage::Saving) => "Saving PDF…",
     };
-    let (fill, text) = if stage.is_some() {
+    let (fill, text) = if progress.is_some() {
         (SURFACE, FOREGROUND)
     } else {
         (FOREGROUND, BACKGROUND)
@@ -559,24 +649,58 @@ fn convert_button(ui: &mut egui::Ui, ready: bool, stage: Option<ConversionStage>
     ))
     .fill(fill)
     .corner_radius(8)
-    .min_size(egui::vec2(ui.available_width(), 38.0));
+    .min_size(size);
     let response = ui.add_enabled(ready, button);
-    if stage.is_some() {
+    if let Some((_, fraction)) = progress {
         let edge = response.rect.shrink2(egui::vec2(7.0, 1.0));
-        // The compiler provides no completion estimate, so animate an activity line.
-        let time = ui.input(|input| input.time);
-        let angle = time * std::f64::consts::TAU / 2.4;
-        let position = (0.5 - 0.5 * angle.cos()) as f32;
-        let length = edge.width() * 0.22;
-        let start = edge.left() + (edge.width() - length) * position;
+        ui.painter()
+            .hline(edge.x_range(), edge.bottom(), egui::Stroke::new(2.0, LINE));
         ui.painter().hline(
-            start..=start + length,
+            edge.left()..=edge.left() + edge.width() * fraction,
             edge.bottom(),
             egui::Stroke::new(2.0, FOREGROUND),
         );
         ui.ctx().request_repaint_after(Duration::from_millis(16));
+        response.on_disabled_hover_text("Estimated progress");
+        return false;
     }
     response.clicked()
+}
+
+fn paint_conversion_check(ui: &egui::Ui, center: egui::Pos2, elapsed: Duration) {
+    let seconds = elapsed.as_secs_f32();
+    let painter = ui.painter();
+    let radius = 8.0;
+    let outline = egui::Stroke::new(1.2, SUCCESS.gamma_multiply(0.8));
+    let sweep = (seconds / 0.28).min(1.0);
+    if sweep >= 1.0 {
+        painter.circle_stroke(center, radius, outline);
+    } else if sweep > 0.0 {
+        let points = (0..=24)
+            .map(|step| {
+                let angle = std::f32::consts::TAU * sweep * step as f32 / 24.0
+                    - std::f32::consts::FRAC_PI_2;
+                center + egui::Vec2::angled(angle) * radius
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, outline));
+    }
+
+    let check = ((seconds - 0.16) / 0.22).clamp(0.0, 1.0);
+    if check > 0.0 {
+        let start = center + egui::vec2(-3.8, 0.0);
+        let bend = center + egui::vec2(-1.0, 2.7);
+        let end = center + egui::vec2(4.0, -2.9);
+        let points = if check < 0.35 {
+            vec![start, start.lerp(bend, check / 0.35)]
+        } else {
+            vec![start, bend, bend.lerp(end, (check - 0.35) / 0.65)]
+        };
+        painter.add(egui::Shape::line(points, egui::Stroke::new(1.6, SUCCESS)));
+    }
+    if check < 1.0 {
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
 }
 
 fn source_target(ui: &mut egui::Ui, has_sources: bool, file_hover: bool) -> bool {
@@ -640,6 +764,80 @@ fn default_destination(source: &Path, style: MathStyle) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_estimate_keeps_filling_without_jumping_at_stage_changes() {
+        let start = Instant::now();
+        let mut progress = ConversionProgress::new(start);
+        let typesetting = start + Duration::from_millis(500);
+        let reading_fill = progress.advance(typesetting);
+        assert!(reading_fill > 0.0);
+        progress.enter(ConversionStage::Typesetting, typesetting);
+        assert_eq!(progress.advance(typesetting), reading_fill);
+
+        let mut previous = reading_fill;
+        for seconds in [1, 2, 10, 60, 120] {
+            let fill = progress.advance(typesetting + Duration::from_secs(seconds));
+            assert!(fill > previous && fill < 0.95);
+            previous = fill;
+        }
+        let saving = typesetting + Duration::from_secs(120);
+        progress.enter(ConversionStage::Saving, saving);
+        assert_eq!(progress.advance(saving), previous);
+        let fill = progress.advance(saving + Duration::from_millis(200));
+        assert!(fill > previous && fill < 1.0);
+    }
+
+    #[test]
+    fn successful_export_shows_a_passive_converted_bar_until_a_file_is_added() {
+        let mut app = Converter::default();
+        app.add_sources([PathBuf::from("first.tns")]);
+        let (send, receiver) = mpsc::channel();
+        app.status = Status::Working {
+            receiver,
+            progress: ConversionProgress::new(Instant::now()),
+        };
+        send.send(WorkerUpdate::Finished(Ok((
+            PathBuf::from("first.pdf"),
+            Stats::default(),
+        ))))
+        .ok()
+        .unwrap();
+        app.update_status();
+        app.add_sources([PathBuf::from("first.tns")]);
+        app.add_sources([PathBuf::from("ignored.txt")]);
+        assert!(matches!(app.status, Status::Done { .. }));
+
+        let ctx = egui::Context::default();
+        let completed_frame = |elapsed| {
+            ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(!convert_button(ui, true, None, Some(elapsed)));
+                });
+            })
+        };
+        let starting = completed_frame(Duration::from_millis(100));
+        assert!(starting.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Path(path) if path.points.len() > 3
+        )));
+        let output = completed_frame(Duration::from_millis(500));
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Circle(circle) if circle.radius == 8.0
+        )));
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == "Converted"
+        )));
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Path(path) if path.points.len() == 3
+                && matches!(&path.stroke.color, egui::epaint::ColorMode::Solid(color) if *color == SUCCESS)
+        )));
+        app.add_sources([PathBuf::from("second.tns")]);
+        assert!(matches!(app.status, Status::Idle));
+    }
 
     #[test]
     fn dragged_row_follows_pointer_and_other_rows_animate_into_place() {
