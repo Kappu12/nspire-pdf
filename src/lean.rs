@@ -105,8 +105,9 @@ pub fn text(input: &str, in_subscript: bool) -> String {
             '+' | '=' | '*' | '/' | '<' | '>' | '≤' | '≥' | '≠' | '≈' | '⇔' => {
                 result.extend([' ', ch, ' ']);
             }
-            '·' | '×' => result.push_str(" * "),
-            '▶' => result.push_str(" ▷ "),
+            '·' | '×' | '•' => result.push_str(" * "),
+            '÷' => result.push_str(" / "),
+            '▶' | '►' | '▸' => result.push_str(" ▷ "),
             '\u{f03f}' => result.push('e'),
             '\u{f005}' => result.push_str(" ^ (-1)"),
             '\u{f041}' => result.push('c'),

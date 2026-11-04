@@ -21,6 +21,14 @@ const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
   {\color{accent}\sffamily\large\bfseries #1\par}%
   \vspace{3pt}{\color{rulecolor}\hrule}\vspace{4pt}}
 \newcommand{\mathline}[1]{\par{\raggedright\leftskip=1em #1\par}}
+\newsavebox{\notemathbox}
+\newcommand{\notemath}[1]{%
+  \sbox{\notemathbox}{\(\displaystyle #1\)}%
+  \ifdim\wd\notemathbox>\dimexpr\linewidth-1em\relax
+    \resizebox{\dimexpr\linewidth-1em\relax}{!}{\usebox{\notemathbox}}%
+  \else
+    \(\displaystyle #1\)%
+  \fi}
 \newcommand{\noteimage}[2]{%
   \par\smallskip{\centering\includegraphics[width=.94\linewidth,height=#1\textheight,keepaspectratio]{#2}\par}\smallskip}
 \newcommand{\omittedwidget}[1]{\par{\small\color{accent} Interactive widget omitted: #1\par}}
@@ -51,6 +59,14 @@ fn name<'a>(node: Node<'a, '_>) -> &'a str {
 
 fn children<'a, 'input>(node: Node<'a, 'input>) -> impl Iterator<Item = Node<'a, 'input>> {
     node.children().filter(Node::is_element)
+}
+
+fn app_panes<'a, 'input>(problem: Node<'a, 'input>) -> impl Iterator<Item = Node<'a, 'input>> {
+    problem
+        .descendants()
+        .filter(|node| node.has_tag_name("card"))
+        .flat_map(children)
+        .filter(|node| node.has_tag_name("wdgt"))
 }
 
 pub fn render(
@@ -101,7 +117,7 @@ pub fn render(
             format!("Problem {number} / {}", escape(title))
         };
         let mut heading_written = false;
-        for widget in xml.descendants().filter(|n| n.has_tag_name("wdgt")) {
+        for widget in app_panes(xml.root_element()) {
             let widget_type = widget.attribute("type").unwrap_or("unknown");
             let supported = widget_type == "TI.Notepad";
             if !supported {
@@ -120,10 +136,10 @@ pub fn render(
                 wrote_problem = true;
             }
             if !supported {
-                let label = if widget_type == "TI.ScriptApp" {
-                    "TI-Nspire Lua app"
-                } else {
-                    widget_type
+                let label = match widget_type {
+                    "TI.ScriptApp" => "TI-Nspire Lua app",
+                    "TI.GeoGrapher" => "TI-Nspire Graphs & Geometry",
+                    _ => widget_type,
                 };
                 writeln!(tex, r"\omittedwidget{{{}}}", escape(label))?;
                 continue;
@@ -248,7 +264,7 @@ impl Renderer<'_> {
             self.expressions.push(expression.trim().to_owned());
             line.push(lean::SLOT);
         } else {
-            write!(line, r"\(\displaystyle {expression}\)")?;
+            write!(line, r"\notemath{{{expression}}}")?;
         }
         Ok(())
     }
@@ -413,6 +429,7 @@ fn math_element(node: Node<'_, '_>, inside_subscript: bool, style: MathStyle) ->
             let [top, bottom] = values.as_slice() else {
                 bail!("expected two fraction operands");
             };
+            let (top, bottom) = (math_slot(top, style), math_slot(bottom, style));
             if style == MathStyle::Lean {
                 format!("({} / {})", lean::operand(top), lean::operand(bottom))
             } else {
@@ -425,6 +442,7 @@ fn math_element(node: Node<'_, '_>, inside_subscript: bool, style: MathStyle) ->
             let [value] = values.as_slice() else {
                 bail!("expected one operand for {kind}");
             };
+            let value = math_slot(value, style);
             if style == MathStyle::Lean {
                 if operator == '^' {
                     format!(" ^ {}", lean::operand(value))
@@ -461,7 +479,8 @@ fn math_template(
     style: MathStyle,
 ) -> Result<String> {
     use MathStyle::{Latex, Lean};
-    Ok(match (kind, args, style) {
+    let values: Vec<_> = args.iter().map(|arg| math_slot(arg, style)).collect();
+    Ok(match (kind, values.as_slice(), style) {
         ("0sqrt", [x], Latex) => format!(r"\sqrt{{{x}}}"),
         ("0sqrt", [x], Lean) => format!("sqrt ({x})"),
         ("0nroot", [x, index], Latex) => format!(r"\sqrt[{index}]{{{x}}}"),
@@ -476,17 +495,66 @@ fn math_template(
             format!(r"\frac{{\mathrm{{d}}}}{{\mathrm{{d}}{var}}}\left({x}\right)")
         }
         ("0deriv", [x, var], Lean) => format!("derivative ({var}) ({x})"),
+        ("0deriv", [x, var, order], Latex) => {
+            format!(
+                r"\frac{{\mathrm{{d}}^{{{order}}}}}{{\mathrm{{d}}{var}^{{{order}}}}}\left({x}\right)"
+            )
+        }
+        ("0deriv", [x, var, order], Lean) => format!("derivativeN ({order}) ({var}) ({x})"),
+        ("0integral", [x, var], Latex) => format!(r"\int {x}\,\mathrm{{d}}{var}"),
+        ("0integral", [x, var], Lean) => format!("antiderivative (fun {var} => {x})"),
         ("0integral", [x, var, lower, upper], Latex) => {
             format!(r"\int_{{{lower}}}^{{{upper}}} {x}\,\mathrm{{d}}{var}")
         }
         ("0integral", [x, var, lower, upper], Lean) => {
             format!("integral ({lower}) ({upper}) (fun {var} => {x})")
         }
-        ("0sum", [x, var, lower, upper], Latex) => {
-            format!(r"\sum_{{{var}={lower}}}^{{{upper}}} {x}")
+        ("0sum" | "0product", [x, var, lower, upper], Latex) => {
+            let operator = if kind == "0sum" { r"\sum" } else { r"\prod" };
+            format!(r"{operator}_{{{var}={lower}}}^{{{upper}}} {x}")
         }
-        ("0sum", [x, var, lower, upper], Lean) => {
-            format!("sum ({lower}) ({upper}) (fun {var} => {x})")
+        ("0sum" | "0product", [x, var, lower, upper], Lean) => {
+            let operator = if kind == "0sum" { "sum" } else { "product" };
+            format!("{operator} ({lower}) ({upper}) (fun {var} => {x})")
+        }
+        ("0limit", [x, var, point, ..], Latex) if matches!(args.len(), 3 | 4) => {
+            let direction = args.get(3).map_or("", |arg| arg.trim());
+            let side = match direction.parse::<f64>().ok() {
+                Some(n) if n < 0.0 => "^{-}".to_owned(),
+                Some(n) if n > 0.0 => "^{+}".to_owned(),
+                Some(_) => String::new(),
+                None if direction.is_empty() => String::new(),
+                None => format!(r"^{{[{direction}]}}"),
+            };
+            format!(r"\lim_{{{var}\to {point}{side}}} {x}")
+        }
+        ("0limit", [x, var, point, ..], Lean) if matches!(args.len(), 3 | 4) => {
+            let direction = args.get(3).map_or("", |arg| arg.trim());
+            if direction.is_empty() {
+                format!("limit ({point}) (fun {var} => {x})")
+            } else {
+                format!("limitFrom ({direction}) ({point}) (fun {var} => {x})")
+            }
+        }
+        ("0dms", [degrees, minutes, seconds], Latex) => format!(
+            r"{{{degrees}}}^{{\circ}}\,{{{minutes}}}^{{\prime}}\,{{{seconds}}}^{{\prime\prime}}"
+        ),
+        ("0dms", [degrees, minutes, seconds], Lean) => {
+            format!("dms ({degrees}) ({minutes}) ({seconds})")
+        }
+        ("0piecewise", expressions, Latex) if !expressions.is_empty() => {
+            let rows: Vec<_> = expressions
+                .chunks(2)
+                .map(|pair| match pair {
+                    [expr, condition] => format!("{expr} & {condition}"),
+                    [expr] => format!(r"{expr} & \text{{otherwise}}"),
+                    _ => unreachable!(),
+                })
+                .collect();
+            format!(r"\begin{{cases}}{}\end{{cases}}", rows.join(r"\\ "))
+        }
+        ("0piecewise", expressions, Lean) if !expressions.is_empty() => {
+            format!("piecewise ({})", expressions.join(", "))
         }
         ("0system", rows, Latex) if !rows.is_empty() => format!(
             r"\left\{{\begin{{gathered}}{}\end{{gathered}}\right.",
@@ -518,6 +586,17 @@ fn math_template(
             args.len()
         ),
     })
+}
+
+fn math_slot(value: &str, style: MathStyle) -> &str {
+    if value.trim().is_empty() {
+        match style {
+            MathStyle::Latex => "□",
+            MathStyle::Lean => "_",
+        }
+    } else {
+        value
+    }
 }
 
 pub(crate) fn escape(text: &str) -> String {
@@ -569,10 +648,11 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             {
                 out.push_str(r"\,")
             }
-            '*' | '·' => out.push_str(r"\cdot "),
+            '*' | '·' | '•' => out.push_str(r"\cdot "),
             '×' => out.push_str(r"\times "),
+            '÷' => out.push_str(r"\div "),
             '−' => out.push('-'),
-            '▶' => out.push_str(r"\triangleright "),
+            '▶' | '►' | '▸' => out.push_str(r"\mathbin{\triangleright}"),
             '\u{f03f}' => out.push_str(r"\mathrm{e}"),
             '\u{f000}' => {
                 let sign = chars.next_if(|c| matches!(c, '+' | '-' | '−'));
@@ -606,18 +686,20 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             'Α'..='Ω'
             | 'α'..='ω'
             | '±'
-            | '∈'
-            | '∉'
+            | 'ℕ'
             | 'ℤ'
+            | 'ℚ'
             | 'ℝ'
-            | '∑'
-            | '→'
-            | '⇒'
-            | '∥'
-            | '⊥'
+            | 'ℂ'
+            | '\u{2190}'..='\u{22ff}'
             | '²'
             | '⁺'
             | '⁻' => out.push(ch),
+            '_' if chars.next_if_eq(&'°').is_some() => {
+                let unit: String =
+                    std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
+                write!(out, r"\,{{}}^{{\circ}}\mathrm{{{unit}}}")?;
+            }
             '_' if chars.peek().is_some_and(char::is_ascii_alphabetic) => {
                 let token: String =
                     std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
@@ -694,6 +776,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nested_graph_controls_are_not_app_panes() {
+        let xml = Document::parse(
+            r#"<prob xmlns="urn:TI.Problem"><card>
+                <wdgt type="TI.Notepad"/>
+                <wdgt type="TI.GeoGrapher"><wdgt type="EditingLine"/></wdgt>
+            </card></prob>"#,
+        )
+        .unwrap();
+        let types: Vec<_> = app_panes(xml.root_element())
+            .filter_map(|pane| pane.attribute("type"))
+            .collect();
+        assert_eq!(types, ["TI.Notepad", "TI.GeoGrapher"]);
+    }
+
+    #[test]
     fn renders_ti_scientific_notation_as_a_power() {
         assert_eq!(
             math_text("1-7.504516\u{f000}−6", false).unwrap(),
@@ -747,6 +844,29 @@ mod tests {
         assert_eq!(
             math_template(xml.root_element(), "0sum", &operands, MathStyle::Latex).unwrap(),
             r"\sum_{x=0}^{1} f(x)"
+        );
+    }
+
+    #[test]
+    fn limits_and_blank_indefinite_integrals_keep_their_slots() {
+        let xml = Document::parse("<node/>").unwrap();
+        let limit = ["f(x)", "x", "0", "-1"].map(str::to_owned);
+        assert_eq!(
+            math_template(xml.root_element(), "0limit", &limit, MathStyle::Latex).unwrap(),
+            r"\lim_{x\to 0^{-}} f(x)"
+        );
+        let integral = ["", "x"].map(str::to_owned);
+        assert_eq!(
+            math_template(xml.root_element(), "0integral", &integral, MathStyle::Latex).unwrap(),
+            r"\int □\,\mathrm{d}x"
+        );
+    }
+
+    #[test]
+    fn catalog_conversion_keeps_operator_and_constant() {
+        assert_eq!(
+            math_text("12•_m►_ft+_c", false).unwrap(),
+            r"12\cdot \mathrm{m}\mathbin{\triangleright}\mathrm{ft}+\mathrm{c}"
         );
     }
 }
