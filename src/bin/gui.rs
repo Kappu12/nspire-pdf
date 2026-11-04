@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText};
-use nspire_pdf::{ConversionStage, ExportOptions, MathStyle, OutputPolicy, Stats};
+use nspire_pdf::{ConversionStage, ExportOptions, MathStyle, OutputPolicy, PdfIntro, Stats};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::{
     env,
@@ -118,6 +118,8 @@ struct Converter {
     sources: Vec<PathBuf>,
     source_drag: Option<SourceDrag>,
     output_name: Option<String>,
+    title: Option<String>,
+    markdown: String,
     status: Status,
     style: MathStyle,
     show_widget_placeholders: bool,
@@ -148,7 +150,9 @@ impl Converter {
     fn default_output_path(&self) -> Option<PathBuf> {
         let first = self.sources.first()?;
         Some(if self.sources.len() > 1 {
-            first.with_file_name("Combined Notes.pdf")
+            first.with_file_name(
+                numbered_batch_name(&self.sources).unwrap_or_else(|| "Combined Notes.pdf".into()),
+            )
         } else {
             default_destination(first, self.style)
         })
@@ -221,6 +225,8 @@ impl Converter {
 
     fn start(&mut self, ctx: &egui::Context, destination: PathBuf, output_policy: OutputPolicy) {
         let sources = self.sources.clone();
+        let title = self.document_title(&destination).into_owned();
+        let markdown = self.markdown.clone();
         let ctx = ctx.clone();
         let options = ExportOptions {
             style: self.style,
@@ -230,11 +236,15 @@ impl Converter {
         let worker = thread::Builder::new()
             .name("pdf-converter".into())
             .spawn(move || {
-                let result = nspire_pdf::convert_files_with_output_policy(
+                let result = nspire_pdf::convert_files_with_intro(
                     &sources,
                     &destination,
                     options,
                     output_policy,
+                    Some(PdfIntro {
+                        title: &title,
+                        markdown: &markdown,
+                    }),
                     |stage| {
                         let _ = send.send(WorkerUpdate::Progress(stage));
                         ctx.request_repaint();
@@ -252,6 +262,20 @@ impl Converter {
             },
             Err(error) => Status::Failed(format!("Could not start conversion. {error}")),
         };
+    }
+
+    fn document_title<'a>(&'a self, destination: &'a Path) -> std::borrow::Cow<'a, str> {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(std::borrow::Cow::Borrowed)
+            .unwrap_or_else(|| {
+                destination
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            })
     }
 
     fn update_status(&mut self) {
@@ -475,6 +499,41 @@ impl Converter {
         }
     }
 
+    fn intro_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(destination) = self
+            .suggested_destination()
+            .or_else(|| self.default_output_path())
+        else {
+            return;
+        };
+        let mut title = self
+            .title
+            .clone()
+            .unwrap_or_else(|| self.document_title(&destination).into_owned());
+        let width = ui.available_width();
+        let title_label = ui.label(RichText::new("PDF title").color(MUTED));
+        if ui
+            .add(egui::TextEdit::singleline(&mut title).desired_width(width))
+            .labelled_by(title_label.id)
+            .changed()
+        {
+            self.title = Some(title);
+            self.status = Status::Idle;
+        }
+        let notes_label = ui.label(RichText::new("Notes (Markdown)").color(MUTED));
+        if ui
+            .add(
+                egui::TextEdit::multiline(&mut self.markdown)
+                    .desired_width(width)
+                    .desired_rows(3),
+            )
+            .labelled_by(notes_label.id)
+            .changed()
+        {
+            self.status = Status::Idle;
+        }
+    }
+
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         match &mut self.status {
             Status::Idle => {
@@ -580,6 +639,8 @@ impl eframe::App for Converter {
                             self.sources_ui(ui);
                             ui.add_space(9.0);
                             self.output_ui(ui);
+                            ui.add_space(9.0);
+                            self.intro_ui(ui);
                         }
                     });
                     ui.add_space(17.0);
@@ -778,6 +839,32 @@ fn default_destination(source: &Path, style: MathStyle) -> PathBuf {
     let mut filename = source.file_stem().unwrap_or_default().to_os_string();
     filename.push(suffix);
     source.with_file_name(filename)
+}
+
+fn numbered_batch_name(sources: &[PathBuf]) -> Option<String> {
+    let (prefix, _) = sources.first()?.file_stem()?.to_str()?.rsplit_once('_')?;
+    let mut numbers = sources
+        .iter()
+        .map(|path| {
+            let (candidate, suffix) = path.file_stem()?.to_str()?.rsplit_once('_')?;
+            if candidate != prefix || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Some((suffix.parse::<u64>().ok()?, suffix))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    numbers.sort_unstable_by_key(|(number, _)| *number);
+    if numbers
+        .windows(2)
+        .any(|pair| pair[0].0.checked_add(1) != Some(pair[1].0))
+    {
+        return None;
+    }
+    Some(format!(
+        "{prefix}_{}-{}.pdf",
+        numbers.first()?.1,
+        numbers.last()?.1
+    ))
 }
 
 #[cfg(test)]
@@ -991,6 +1078,24 @@ mod tests {
         assert_eq!(
             app.suggested_destination(),
             Some(PathBuf::from("school").join("Revision.pdf"))
+        );
+    }
+
+    #[test]
+    fn consecutive_numbered_files_fill_in_an_editable_filename_and_title() {
+        let mut app = Converter::default();
+        app.add_sources(["KPL_02.tns", "KPL_01.tns", "KPL_03.tns"].map(PathBuf::from));
+        let path = app.suggested_destination().unwrap();
+        assert_eq!(path, PathBuf::from("KPL_01-03.pdf"));
+        assert_eq!(app.document_title(&path), "KPL_01-03");
+        app.output_name = Some("Physics.pdf".into());
+        let path = app.suggested_destination().unwrap();
+        assert_eq!(app.document_title(&path), "Physics");
+        app.title = Some("Exam review".into());
+        assert_eq!(app.document_title(&path), "Exam review");
+        assert_eq!(
+            numbered_batch_name(&["KPL_1.tns", "KPL_3.tns"].map(PathBuf::from)),
+            None
         );
     }
 }

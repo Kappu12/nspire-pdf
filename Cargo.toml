@@ -18,6 +18,7 @@ eframe = { version = "0.33.3", default-features = false, features = ["glow", "de
 flate2 = "1.1.10"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "png", "jpeg"] }
 open = { version = "5", optional = true }
+pulldown-cmark = { version = "0.13", default-features = false }
 rfd = { version = "0.16", optional = true }
 roxmltree = "0.21.2"
 tempfile = "3.27.0"

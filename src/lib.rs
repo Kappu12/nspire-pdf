@@ -1,6 +1,7 @@
 mod archive;
 mod latex;
 mod lean;
+mod markdown;
 mod tixc;
 
 pub use latex::Stats;
@@ -31,6 +32,11 @@ pub struct ExportOptions {
 pub enum OutputPolicy {
     CreateNew,
     ReplaceExisting,
+}
+
+pub struct PdfIntro<'a> {
+    pub title: &'a str,
+    pub markdown: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -88,6 +94,17 @@ pub fn convert_files_with_output_policy(
     output: &Path,
     options: ExportOptions,
     output_policy: OutputPolicy,
+    report: impl FnMut(ConversionStage),
+) -> Result<Stats> {
+    convert_files_with_intro(inputs, output, options, output_policy, None, report)
+}
+
+pub fn convert_files_with_intro(
+    inputs: &[impl AsRef<Path>],
+    output: &Path,
+    options: ExportOptions,
+    output_policy: OutputPolicy,
+    intro: Option<PdfIntro<'_>>,
     mut report: impl FnMut(ConversionStage),
 ) -> Result<Stats> {
     ensure!(!inputs.is_empty(), "choose at least one TI-Nspire file");
@@ -124,6 +141,9 @@ pub fn convert_files_with_output_policy(
     report(ConversionStage::Reading);
     let work = tempfile::tempdir()?;
     let mut renderer = latex::Renderer::new(work.path(), options);
+    if let Some(intro) = &intro {
+        renderer.write_intro(intro, inputs.len() == 1)?;
+    }
     for input in inputs {
         let input = input.as_ref();
         let mut append = || {
@@ -133,7 +153,8 @@ pub fn convert_files_with_output_policy(
                 .file_stem()
                 .context("input needs a file name")?
                 .to_string_lossy();
-            renderer.append(&archive, &title)
+            let heading = (intro.is_none() || inputs.len() > 1).then_some(title.as_ref());
+            renderer.append(&archive, heading)
         };
         if inputs.len() > 1 {
             append().with_context(|| format!("converting {}", input.display()))?;

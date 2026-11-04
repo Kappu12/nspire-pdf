@@ -1,5 +1,5 @@
 use crate::archive::Archive;
-use crate::{ExportOptions, MathStyle, lean};
+use crate::{ExportOptions, MathStyle, PdfIntro, lean, markdown};
 use anyhow::{Context, Result, bail, ensure};
 use roxmltree::{Document, Node};
 use std::{collections::BTreeMap, fmt::Write, io::Cursor, path::Path};
@@ -71,6 +71,17 @@ fn app_panes<'a, 'input>(problem: Node<'a, 'input>) -> impl Iterator<Item = Node
         .filter(|node| node.has_tag_name("wdgt"))
 }
 
+fn write_document_heading(tex: &mut String, title: &str, style: MathStyle) -> Result<()> {
+    writeln!(tex, r"{{\sffamily\huge\bfseries {}}}\par", escape(title))?;
+    let label = if style == MathStyle::Lean {
+        "Lean notation"
+    } else {
+        "LaTeX equations"
+    };
+    writeln!(tex, r"{{\sffamily\small\color{{accent}} {label}}}\par")?;
+    Ok(())
+}
+
 impl<'a> Renderer<'a> {
     pub(crate) fn new(work: &'a Path, options: ExportOptions) -> Self {
         Self {
@@ -83,20 +94,34 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub(crate) fn append(&mut self, archive: &Archive<'_>, title: &str) -> Result<()> {
+    pub(crate) fn write_intro(&mut self, intro: &PdfIntro<'_>, single_source: bool) -> Result<()> {
+        let title = intro.title.replace(lean::SLOT, "");
+        if single_source {
+            write_document_heading(&mut self.tex, &title, self.options.style)?;
+        } else {
+            writeln!(
+                self.tex,
+                r"{{\sffamily\huge\bfseries {}}}\par",
+                escape(&title)
+            )?;
+        }
+        markdown::render(intro.markdown, &mut self.tex)?;
+        if !single_source {
+            self.tex.push_str("\\par\\medskip\n");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append(&mut self, archive: &Archive<'_>, title: Option<&str>) -> Result<()> {
         let previous_notes = self.stats.notes;
         self.assets.clear();
         let mut tex = String::new();
         if previous_notes > 0 {
             tex.push_str("\\clearpage\n");
         }
-        writeln!(tex, r"{{\sffamily\huge\bfseries {}}}\par", escape(title))?;
-        let label = if self.options.style == MathStyle::Lean {
-            "Lean notation"
-        } else {
-            "LaTeX equations"
-        };
-        writeln!(tex, r"{{\sffamily\small\color{{accent}} {label}}}\par")?;
+        if let Some(title) = title {
+            write_document_heading(&mut tex, title, self.options.style)?;
+        }
         let mut problems: Vec<_> = archive
             .0
             .iter()
