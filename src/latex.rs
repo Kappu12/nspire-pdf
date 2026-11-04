@@ -46,12 +46,12 @@ pub struct Stats {
     pub skipped_widgets: usize,
 }
 
-struct Renderer<'a> {
-    archive: &'a Archive<'a>,
+pub(crate) struct Renderer<'a> {
     work: &'a Path,
+    tex: String,
     assets: BTreeMap<String, String>,
     stats: Stats,
-    style: MathStyle,
+    options: ExportOptions,
     expressions: Vec<String>,
 }
 
@@ -71,100 +71,109 @@ fn app_panes<'a, 'input>(problem: Node<'a, 'input>) -> impl Iterator<Item = Node
         .filter(|node| node.has_tag_name("wdgt"))
 }
 
-pub fn render(
-    archive: &Archive<'_>,
-    title: &str,
-    work: &Path,
-    options: ExportOptions,
-) -> Result<(String, Stats)> {
-    let style = options.style;
-    let mut renderer = Renderer {
-        archive,
-        work,
-        assets: BTreeMap::new(),
-        stats: Stats::default(),
-        style,
-        expressions: Vec::new(),
-    };
-    let mut tex = PREAMBLE.to_owned();
-    writeln!(tex, r"{{\sffamily\huge\bfseries {}}}\par", escape(title))?;
-    let label = if style == MathStyle::Lean {
-        "Lean notation"
-    } else {
-        "LaTeX equations"
-    };
-    writeln!(tex, r"{{\sffamily\small\color{{accent}} {label}}}\par")?;
-    let mut problems: Vec<_> = archive
-        .0
-        .iter()
-        .filter_map(|(&file, entry)| {
-            let number: u32 = file
-                .strip_prefix("Problem")?
-                .strip_suffix(".xml")?
-                .parse()
-                .ok()?;
-            Some((number, file, entry))
-        })
-        .collect();
-    problems.sort_unstable_by_key(|(number, _, _)| *number);
-    let mut wrote_problem = false;
-    for (number, file, entry) in problems {
-        let decoded = entry.decode().with_context(|| format!("decoding {file}"))?;
-        let xml = Document::parse(str::from_utf8(&decoded)?)
-            .with_context(|| format!("parsing {file}"))?;
-        let title = xml.root_element().attribute("pbname").unwrap_or("").trim();
-        let heading = if title.is_empty() {
-            format!("Problem {number}")
-        } else {
-            format!("Problem {number} / {}", escape(title))
-        };
-        let mut heading_written = false;
-        for widget in app_panes(xml.root_element()) {
-            let widget_type = widget.attribute("type").unwrap_or("unknown");
-            let supported = widget_type == "TI.Notepad";
-            if !supported {
-                renderer.stats.skipped_widgets += 1;
-                eprintln!("warning: {file}: skipping widget type {widget_type}");
-                if !options.show_widget_placeholders {
-                    continue;
-                }
-            }
-            if !heading_written {
-                if wrote_problem {
-                    tex.push_str("\\clearpage\n");
-                }
-                writeln!(tex, r"\problem{{{heading}}}")?;
-                heading_written = true;
-                wrote_problem = true;
-            }
-            if !supported {
-                let label = match widget_type {
-                    "TI.ScriptApp" => "TI-Nspire Lua app",
-                    "TI.GeoGrapher" => "TI-Nspire Graphs & Geometry",
-                    _ => widget_type,
-                };
-                writeln!(tex, r"\omittedwidget{{{}}}", escape(label))?;
-                continue;
-            }
-            let source = children(widget)
-                .find(|node| node.has_tag_name("fmtxt"))
-                .and_then(|n| n.text())
-                .context("Notes widget has no formatted text")?;
-            renderer
-                .notes(source, &mut tex)
-                .with_context(|| format!("rendering {file}"))?;
+impl<'a> Renderer<'a> {
+    pub(crate) fn new(work: &'a Path, options: ExportOptions) -> Self {
+        Self {
+            work,
+            tex: PREAMBLE.to_owned(),
+            assets: BTreeMap::new(),
+            stats: Stats::default(),
+            options,
+            expressions: Vec::new(),
         }
     }
-    ensure!(renderer.stats.notes > 0, "no TI-Nspire Notes widgets found");
-    tex.push_str("\\end{document}\n");
-    if style == MathStyle::Lean {
-        tex = lean::format_document(&tex, &renderer.expressions, work)?;
-    }
-    Ok((tex, renderer.stats))
-}
 
-impl Renderer<'_> {
-    fn notes(&mut self, source: &str, tex: &mut String) -> Result<()> {
+    pub(crate) fn append(&mut self, archive: &Archive<'_>, title: &str) -> Result<()> {
+        let previous_notes = self.stats.notes;
+        self.assets.clear();
+        let mut tex = String::new();
+        if previous_notes > 0 {
+            tex.push_str("\\clearpage\n");
+        }
+        writeln!(tex, r"{{\sffamily\huge\bfseries {}}}\par", escape(title))?;
+        let label = if self.options.style == MathStyle::Lean {
+            "Lean notation"
+        } else {
+            "LaTeX equations"
+        };
+        writeln!(tex, r"{{\sffamily\small\color{{accent}} {label}}}\par")?;
+        let mut problems: Vec<_> = archive
+            .0
+            .iter()
+            .filter_map(|(&file, entry)| {
+                let number: u32 = file
+                    .strip_prefix("Problem")?
+                    .strip_suffix(".xml")?
+                    .parse()
+                    .ok()?;
+                Some((number, file, entry))
+            })
+            .collect();
+        problems.sort_unstable_by_key(|(number, _, _)| *number);
+        let mut wrote_problem = false;
+        for (number, file, entry) in problems {
+            let decoded = entry.decode().with_context(|| format!("decoding {file}"))?;
+            let xml = Document::parse(str::from_utf8(&decoded)?)
+                .with_context(|| format!("parsing {file}"))?;
+            let title = xml.root_element().attribute("pbname").unwrap_or("").trim();
+            let heading = if title.is_empty() {
+                format!("Problem {number}")
+            } else {
+                format!("Problem {number} / {}", escape(title))
+            };
+            let mut heading_written = false;
+            for widget in app_panes(xml.root_element()) {
+                let widget_type = widget.attribute("type").unwrap_or("unknown");
+                let supported = widget_type == "TI.Notepad";
+                if !supported {
+                    self.stats.skipped_widgets += 1;
+                    eprintln!("warning: {file}: skipping widget type {widget_type}");
+                    if !self.options.show_widget_placeholders {
+                        continue;
+                    }
+                }
+                if !heading_written {
+                    if wrote_problem {
+                        tex.push_str("\\clearpage\n");
+                    }
+                    writeln!(tex, r"\problem{{{heading}}}")?;
+                    heading_written = true;
+                    wrote_problem = true;
+                }
+                if !supported {
+                    let label = match widget_type {
+                        "TI.ScriptApp" => "TI-Nspire Lua app",
+                        "TI.GeoGrapher" => "TI-Nspire Graphs & Geometry",
+                        _ => widget_type,
+                    };
+                    writeln!(tex, r"\omittedwidget{{{}}}", escape(label))?;
+                    continue;
+                }
+                let source = children(widget)
+                    .find(|node| node.has_tag_name("fmtxt"))
+                    .and_then(|n| n.text())
+                    .context("Notes widget has no formatted text")?;
+                self.notes(archive, source, &mut tex)
+                    .with_context(|| format!("rendering {file}"))?;
+            }
+        }
+        ensure!(
+            self.stats.notes > previous_notes,
+            "no TI-Nspire Notes widgets found"
+        );
+        self.tex.push_str(&tex);
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(String, Stats)> {
+        self.tex.push_str("\\end{document}\n");
+        if self.options.style == MathStyle::Lean {
+            self.tex = lean::format_document(&self.tex, &self.expressions, self.work)?;
+        }
+        Ok((self.tex, self.stats))
+    }
+
+    fn notes(&mut self, archive: &Archive<'_>, source: &str, tex: &mut String) -> Result<()> {
         let xml = Document::parse(source)?;
         let root = xml.root_element();
         let document = children(root)
@@ -224,7 +233,7 @@ impl Renderer<'_> {
                         let symbol = text.trim();
                         if !symbol.is_empty() {
                             line.push_str(&escape(&text[..text.len() - text.trim_start().len()]));
-                            let expression = if self.style == MathStyle::Lean {
+                            let expression = if self.options.style == MathStyle::Lean {
                                 format!("vec {}", lean::operand(&lean::text(symbol, false)))
                             } else {
                                 format!(r"\overrightarrow{{{}}}", math_text(symbol, false)?)
@@ -238,10 +247,10 @@ impl Renderer<'_> {
                         flush_line(tex, &mut line, has_words, math_count)?;
                         has_words = false;
                         math_count = 0;
-                        self.image(node, image_height, tex)?;
+                        self.image(archive, node, image_height, tex)?;
                     }
                     "0el" => {
-                        let parts = math_box(node, self.style)?;
+                        let parts = math_box(node, self.options.style)?;
                         for (i, part) in parts.into_iter().enumerate() {
                             if i > 0 {
                                 line.push_str(r"\allowbreak\quad\(\mapsto\)\nobreak\;");
@@ -262,7 +271,7 @@ impl Renderer<'_> {
     }
 
     fn write_math(&mut self, line: &mut String, expression: String) -> Result<()> {
-        if self.style == MathStyle::Lean {
+        if self.options.style == MathStyle::Lean {
             self.expressions.push(expression.trim().to_owned());
             line.push(lean::SLOT);
         } else {
@@ -271,7 +280,13 @@ impl Renderer<'_> {
         Ok(())
     }
 
-    fn image(&mut self, node: Node<'_, '_>, height: &str, tex: &mut String) -> Result<()> {
+    fn image(
+        &mut self,
+        archive: &Archive<'_>,
+        node: Node<'_, '_>,
+        height: &str,
+        tex: &mut String,
+    ) -> Result<()> {
         let widget = children(node)
             .find(|n| n.has_tag_name("wdgt"))
             .context("embedded widget is missing its data")?;
@@ -294,8 +309,7 @@ impl Renderer<'_> {
             ])
         );
         if !self.assets.contains_key(&key) {
-            let mut bytes = self
-                .archive
+            let mut bytes = archive
                 .0
                 .get(name)
                 .with_context(|| format!("missing embedded image {name}"))?
@@ -345,7 +359,7 @@ impl Renderer<'_> {
                 ensure!(right > left && bottom > top, "empty image crop");
                 image = image.crop_imm(left, top, right - left, bottom - top);
             }
-            let filename = format!("image-{}.png", self.assets.len() + 1);
+            let filename = format!("image-{}.png", self.stats.images + 1);
             sharpen_image(image).save(self.work.join(&filename))?;
             self.assets.insert(key.clone(), filename);
         }

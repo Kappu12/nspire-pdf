@@ -63,13 +63,26 @@ pub fn convert_with_options(
     input: &Path,
     output: &Path,
     options: ExportOptions,
+    report: impl FnMut(ConversionStage),
+) -> Result<Stats> {
+    convert_files_with_options(&[input], output, options, report)
+}
+
+pub fn convert_files_with_options(
+    inputs: &[impl AsRef<Path>],
+    output: &Path,
+    options: ExportOptions,
     mut report: impl FnMut(ConversionStage),
 ) -> Result<Stats> {
-    if input
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("tnsp"))
-    {
-        bail!("PublishView .tnsp is a separate format. Convert it to .tns in TI-Nspire first.");
+    ensure!(!inputs.is_empty(), "choose at least one TI-Nspire file");
+    for input in inputs {
+        if input
+            .as_ref()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("tnsp"))
+        {
+            bail!("PublishView .tnsp is a separate format. Convert it to .tns in TI-Nspire first.");
+        }
     }
     ensure!(
         output
@@ -93,14 +106,26 @@ pub fn convert_with_options(
     );
 
     report(ConversionStage::Reading);
-    let source = read_input(input)?;
-    let archive = Archive::parse(&source)?;
     let work = tempfile::tempdir()?;
-    let title = input
-        .file_stem()
-        .context("input needs a file name")?
-        .to_string_lossy();
-    let (tex, stats) = latex::render(&archive, &title, work.path(), options)?;
+    let mut renderer = latex::Renderer::new(work.path(), options);
+    for input in inputs {
+        let input = input.as_ref();
+        let mut append = || {
+            let source = read_input(input)?;
+            let archive = Archive::parse(&source)?;
+            let title = input
+                .file_stem()
+                .context("input needs a file name")?
+                .to_string_lossy();
+            renderer.append(&archive, &title)
+        };
+        if inputs.len() > 1 {
+            append().with_context(|| format!("converting {}", input.display()))?;
+        } else {
+            append()?;
+        }
+    }
+    let (tex, stats) = renderer.finish()?;
     fs::write(work.path().join("document.tex"), tex)?;
 
     report(ConversionStage::Typesetting);
