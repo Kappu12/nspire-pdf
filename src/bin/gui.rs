@@ -27,8 +27,8 @@ fn main() -> eframe::Result {
         TITLE,
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([560.0, 435.0])
-                .with_min_inner_size([475.0, 380.0])
+                .with_inner_size([600.0, 520.0])
+                .with_min_inner_size([475.0, 440.0])
                 .with_drag_and_drop(true),
             ..Default::default()
         },
@@ -63,10 +63,7 @@ struct Converter {
 
 impl Converter {
     fn select_source(&mut self, path: PathBuf) {
-        if !path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("tns"))
-        {
+        if !is_tns(&path) {
             self.status =
                 Status::Failed("Choose a TI-Nspire Notes file with a .tns extension.".into());
             return;
@@ -74,6 +71,19 @@ impl Converter {
         self.destination = Some(default_destination(&path, self.style));
         self.source = Some(path);
         self.status = Status::Idle;
+    }
+
+    fn accept_drops(&mut self, files: &[egui::DroppedFile]) {
+        if let Some(path) = files
+            .iter()
+            .filter_map(|file| file.path.as_deref())
+            .find(|path| is_tns(path))
+        {
+            self.select_source(path.to_owned());
+        } else if !files.is_empty() {
+            self.status =
+                Status::Failed("Drop a TI-Nspire Notes file with a .tns extension.".into());
+        }
     }
 
     fn choose_destination(&mut self) {
@@ -179,16 +189,11 @@ impl eframe::App for Converter {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.update_status();
         let working = matches!(self.status, Status::Working(_));
-        if !working
-            && let Some(path) = ctx.input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .find_map(|file| file.path.clone())
-            })
-        {
-            self.select_source(path);
-        }
+        let file_hover = !working
+            && ctx.input(|input| {
+                self.accept_drops(&input.raw.dropped_files);
+                !input.raw.hovered_files.is_empty()
+            });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(26))
             .show(ctx, |ui| {
@@ -215,15 +220,10 @@ impl eframe::App for Converter {
                             self.status = Status::Idle;
                         }
                         ui.add_space(9.0);
-                        if file_row(
-                            ui,
-                            "Source document",
-                            self.source.as_deref(),
-                            "No file selected",
-                            "Choose TNS…",
-                        ) && let Some(path) = FileDialog::new()
-                            .add_filter("TI-Nspire document", &["tns"])
-                            .pick_file()
+                        if source_target(ui, self.source.as_deref(), file_hover)
+                            && let Some(path) = FileDialog::new()
+                                .add_filter("TI-Nspire document", &["tns"])
+                                .pick_file()
                         {
                             self.select_source(path);
                         }
@@ -265,6 +265,59 @@ impl eframe::App for Converter {
                 });
             });
     }
+}
+
+fn is_tns(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tns"))
+}
+
+fn source_target(ui: &mut egui::Ui, path: Option<&Path>, file_hover: bool) -> bool {
+    let title = if file_hover {
+        "Drop your .tns file"
+    } else if path.is_some() {
+        "Drop another .tns file"
+    } else {
+        "Drop a .tns file here"
+    };
+    let mut label = egui::text::LayoutJob {
+        halign: egui::Align::Center,
+        ..Default::default()
+    };
+    label.append(
+        title,
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(19.0), FOREGROUND),
+    );
+    label.append(
+        "\nor click to browse",
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(14.0), MUTED),
+    );
+    let button = egui::Button::new((egui::Atom::grow(), label, egui::Atom::grow()))
+        .fill(if file_hover { LINE } else { SURFACE })
+        .stroke(egui::Stroke::new(
+            1.0,
+            if file_hover { FOREGROUND } else { LINE },
+        ))
+        .corner_radius(10)
+        .min_size(egui::vec2(ui.available_width(), 112.0));
+    let clicked = ui
+        .add(button)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked();
+    if let Some(path) = path {
+        let filename = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        ui.add(
+            egui::Label::new(RichText::new(format!("Selected: {filename}")).color(MUTED))
+                .truncate(),
+        )
+        .on_hover_text(path.display().to_string());
+    }
+    clicked
 }
 
 fn default_destination(source: &Path, style: MathStyle) -> PathBuf {
@@ -313,4 +366,25 @@ fn file_row(
             clicked
         })
         .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_selects_the_first_tns_file_in_a_mixed_batch() {
+        let mut app = Converter::default();
+        let files = ["readme.txt", "notes.TNS", "other.tns"].map(|path| egui::DroppedFile {
+            path: Some(path.into()),
+            ..Default::default()
+        });
+        app.accept_drops(&files);
+        assert_eq!(app.source.as_deref(), Some(Path::new("notes.TNS")));
+        assert!(matches!(app.status, Status::Idle));
+
+        app.accept_drops(&files[..1]);
+        assert_eq!(app.source.as_deref(), Some(Path::new("notes.TNS")));
+        assert!(matches!(app.status, Status::Failed(_)));
+    }
 }
