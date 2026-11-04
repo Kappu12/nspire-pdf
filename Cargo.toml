@@ -2,12 +2,24 @@
 name = "nspire-pdf"
 version = "0.1.0"
 edition = "2024"
+default-run = "nspire-pdf"
+
+[[bin]]
+name = "nspire-pdf-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
 
 [dependencies]
 anyhow = "1.0.104"
 crc32fast = "1.5.4"
 des = "0.8.1"
+eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts", "accesskit", "x11", "wayland"], optional = true }
 flate2 = "1.1.10"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "png", "jpeg"] }
+open = { version = "5", optional = true }
+rfd = { version = "0.16", optional = true }
 roxmltree = "0.21.2"
 tempfile = "3.27.0"
+
+[features]
+gui = ["dep:eframe", "dep:rfd", "dep:open"]

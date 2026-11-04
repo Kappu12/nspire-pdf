@@ -2,9 +2,23 @@
 
 Convert TI-Nspire Notes documents to printable A4 PDFs. The Rust CLI reads the
 archive, decodes TI method 13 entries, and translates Notes into LaTeX. Tectonic
-compiles the LaTeX with selectable text, typeset equations, and embedded images.
+compiles the LaTeX with selectable text and vector math. The converter sharpens
+small embedded screenshots for print.
 
-## Run
+## Desktop app
+
+Build the desktop app with:
+
+    cargo build --release --features gui
+
+Launch nspire-pdf-gui from target/release. Choose a .tns file or drop one onto
+the window, check the PDF destination, and select Convert to PDF. Open PDF
+opens the result in your default viewer.
+
+The app looks for Tectonic next to its executable or on PATH. The TECTONIC
+environment variable takes precedence.
+
+## Command line
 
 Install Rust and [Tectonic](https://tectonic-typesetting.github.io/). Put
 Tectonic on PATH or set the TECTONIC environment variable to the absolute path

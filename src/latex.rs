@@ -5,8 +5,9 @@ use std::{collections::BTreeMap, fmt::Write, io::Cursor, path::Path};
 
 const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
 \usepackage[margin=23mm,top=24mm,bottom=24mm]{geometry}
-\usepackage{fontspec,amsmath,graphicx,xcolor,needspace}
-\definecolor{ink}{HTML}{182432}
+\usepackage{amsmath,unicode-math,graphicx,xcolor,needspace}
+\setmathfont{latinmodern-math.otf}
+\definecolor{ink}{HTML}{101720}
 \definecolor{accent}{HTML}{245166}
 \definecolor{rulecolor}{HTML}{BDC9CF}
 \setlength{\parindent}{0pt}
@@ -264,13 +265,30 @@ impl Renderer<'_> {
                 image = image.crop_imm(left, top, right - left, bottom - top);
             }
             let filename = format!("image-{}.png", self.assets.len() + 1);
-            image.save(self.work.join(&filename))?;
+            sharpen_image(image).save(self.work.join(&filename))?;
             self.assets.insert(key.clone(), filename);
         }
         self.stats.images += 1;
         writeln!(tex, r"\noteimage{{{height}}}{{{}}}", self.assets[&key])?;
         Ok(())
     }
+}
+
+fn sharpen_image(image: image::DynamicImage) -> image::DynamicImage {
+    // Preserve the source alpha channel and avoid enlarging already large images.
+    if image.color().has_alpha() {
+        return image;
+    }
+    let image = if image.width().max(image.height()) <= 1200 {
+        image.resize_exact(
+            image.width() * 2,
+            image.height() * 2,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        image
+    };
+    image.unsharpen(0.9, 8)
 }
 
 fn normalize_ti_bitmap(bytes: &mut [u8]) {

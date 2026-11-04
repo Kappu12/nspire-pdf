@@ -1,0 +1,303 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+use eframe::egui::{self, Color32, RichText};
+use nspire_pdf::Stats;
+use rfd::FileDialog;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
+};
+
+const TITLE: &str = "Nspire PDF";
+const ACCENT: Color32 = Color32::from_rgb(111, 222, 201);
+const PRIMARY: Color32 = Color32::from_rgb(21, 108, 99);
+const INK: Color32 = Color32::from_rgb(236, 244, 246);
+const MUTED: Color32 = Color32::from_rgb(164, 182, 190);
+const LINE: Color32 = Color32::from_rgb(53, 70, 80);
+const SURFACE: Color32 = Color32::from_rgb(31, 43, 51);
+const BACKGROUND: Color32 = Color32::from_rgb(20, 29, 36);
+const ERROR: Color32 = Color32::from_rgb(255, 161, 152);
+
+fn main() -> eframe::Result {
+    let mut app = Converter::default();
+    if let Some(path) = env::args_os().nth(1) {
+        app.select_source(path.into());
+    }
+    eframe::run_native(
+        TITLE,
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([560.0, 405.0])
+                .with_min_inner_size([475.0, 350.0])
+                .with_drag_and_drop(true),
+            ..Default::default()
+        },
+        Box::new(|cc| {
+            let mut visuals = egui::Visuals::dark();
+            visuals.override_text_color = Some(INK);
+            visuals.selection.bg_fill = LINE;
+            cc.egui_ctx.set_visuals(visuals);
+            Ok(Box::new(app))
+        }),
+    )
+}
+
+type Outcome = Result<(PathBuf, Stats), String>;
+
+#[derive(Default)]
+enum Status {
+    #[default]
+    Idle,
+    Working(Receiver<Outcome>),
+    Done(PathBuf, Stats),
+    Failed(String),
+}
+
+#[derive(Default)]
+struct Converter {
+    source: Option<PathBuf>,
+    destination: Option<PathBuf>,
+    status: Status,
+}
+
+impl Converter {
+    fn select_source(&mut self, path: PathBuf) {
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("tns"))
+        {
+            self.status =
+                Status::Failed("Choose a TI-Nspire Notes file with a .tns extension.".into());
+            return;
+        }
+        let mut destination = path.with_extension("pdf");
+        if destination.exists() {
+            let mut name = path.file_stem().unwrap_or_default().to_os_string();
+            name.push("-print.pdf");
+            destination.set_file_name(name);
+        }
+        self.source = Some(path);
+        self.destination = Some(destination);
+        self.status = Status::Idle;
+    }
+
+    fn choose_destination(&mut self) {
+        let mut dialog = FileDialog::new().add_filter("PDF document", &["pdf"]);
+        if let Some(path) = &self.destination {
+            if let Some(parent) = path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+            if let Some(name) = path.file_name() {
+                dialog = dialog.set_file_name(name.to_string_lossy());
+            }
+        }
+        if let Some(mut path) = dialog.save_file() {
+            if path.extension().is_none() {
+                path.set_extension("pdf");
+            }
+            self.destination = Some(path);
+            self.status = Status::Idle;
+        }
+    }
+
+    fn start(&mut self, ctx: &egui::Context) {
+        let (Some(source), Some(destination)) = (self.source.clone(), self.destination.clone())
+        else {
+            return;
+        };
+        let ctx = ctx.clone();
+        let (send, receive) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("pdf-converter".into())
+            .spawn(move || {
+                let result = nspire_pdf::convert(&source, &destination)
+                    .map(|stats| (destination, stats))
+                    .map_err(|error| format!("{error:#}"));
+                let _ = send.send(result);
+                ctx.request_repaint();
+            });
+        self.status = match worker {
+            Ok(_) => Status::Working(receive),
+            Err(error) => Status::Failed(format!("Could not start conversion. {error}")),
+        };
+    }
+
+    fn update_status(&mut self) {
+        if let Status::Working(receiver) = &self.status {
+            self.status = match receiver.try_recv() {
+                Ok(Ok((path, stats))) => Status::Done(path, stats),
+                Ok(Err(error)) => Status::Failed(error),
+                Err(TryRecvError::Disconnected) => {
+                    Status::Failed("The converter stopped unexpectedly.".into())
+                }
+                Err(TryRecvError::Empty) => return,
+            };
+        }
+    }
+
+    fn status_ui(&mut self, ui: &mut egui::Ui) {
+        match &self.status {
+            Status::Idle => {
+                ui.label(
+                    RichText::new("A4 PDF with selectable text and typeset math.").color(MUTED),
+                );
+            }
+            Status::Working(_) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Preparing your PDF…");
+                });
+            }
+            Status::Done(path, stats) => {
+                let clicked = ui
+                    .horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("PDF saved").strong().color(ACCENT));
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} Notes sections · {} math boxes · {} images",
+                                    stats.notes, stats.math, stats.images,
+                                ))
+                                .color(MUTED),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.button("Open PDF").clicked()
+                        })
+                        .inner
+                    })
+                    .inner;
+                if clicked && let Err(error) = open::that(path) {
+                    self.status =
+                        Status::Failed(format!("PDF saved, but it could not be opened. {error}"));
+                }
+            }
+            Status::Failed(error) => {
+                ui.label(RichText::new(error).color(ERROR));
+            }
+        }
+    }
+}
+
+impl eframe::App for Converter {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.update_status();
+        let working = matches!(self.status, Status::Working(_));
+        if !working
+            && let Some(path) = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .find_map(|file| file.path.clone())
+            })
+        {
+            self.select_source(path);
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(26))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(
+                        RichText::new("TI-NSPIRE NOTES")
+                            .size(12.0)
+                            .strong()
+                            .color(ACCENT),
+                    );
+                    ui.heading(RichText::new("Convert to PDF").size(29.0).strong());
+                    ui.label(
+                        RichText::new("Choose or drop a .tns file to make a print-ready PDF.")
+                            .color(MUTED),
+                    );
+                    ui.add_space(17.0);
+
+                    ui.add_enabled_ui(!working, |ui| {
+                        if file_row(
+                            ui,
+                            "Source document",
+                            self.source.as_deref(),
+                            "No file selected",
+                            "Choose TNS…",
+                        ) && let Some(path) = FileDialog::new()
+                            .add_filter("TI-Nspire document", &["tns"])
+                            .pick_file()
+                        {
+                            self.select_source(path);
+                        }
+
+                        ui.add_space(9.0);
+                        ui.add_enabled_ui(self.source.is_some(), |ui| {
+                            if file_row(
+                                ui,
+                                "Save PDF as",
+                                self.destination.as_deref(),
+                                "Choose a source first",
+                                "Change…",
+                            ) {
+                                self.choose_destination();
+                            }
+                        });
+                    });
+                    ui.add_space(17.0);
+                    let convert = egui::Button::new((
+                        egui::Atom::grow(),
+                        RichText::new(if working {
+                            "Converting…"
+                        } else {
+                            "Convert to PDF"
+                        })
+                        .strong()
+                        .color(Color32::WHITE),
+                        egui::Atom::grow(),
+                    ))
+                    .fill(PRIMARY)
+                    .corner_radius(8)
+                    .min_size(egui::vec2(ui.available_width(), 38.0));
+                    let ready = !working && self.source.is_some() && self.destination.is_some();
+                    if ui.add_enabled(ready, convert).clicked() {
+                        self.start(ctx);
+                    }
+                    ui.add_space(12.0);
+                    self.status_ui(ui);
+                });
+            });
+    }
+}
+
+fn file_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    path: Option<&Path>,
+    empty: &str,
+    button: &str,
+) -> bool {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, LINE))
+        .corner_radius(8)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            let clicked = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new(label).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.button(button).clicked()
+                    })
+                    .inner
+                })
+                .inner;
+            let displayed = path.map(|p| p.display().to_string());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(displayed.as_deref().unwrap_or(empty))
+                        .size(13.0)
+                        .color(MUTED),
+                )
+                .truncate(),
+            )
+            .on_hover_text(displayed.as_deref().unwrap_or(empty));
+            clicked
+        })
+        .inner
+}
