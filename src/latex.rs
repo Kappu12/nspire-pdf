@@ -31,8 +31,8 @@ const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
   \else
     \(\displaystyle #1\)%
   \fi}
-\newcommand{\noteimage}[2]{%
-  \par\smallskip{\centering\includegraphics[width=.94\linewidth,height=#1\textheight,keepaspectratio]{#2}\par}\smallskip}
+\newcommand{\noteimage}[3]{%
+  \par\smallskip{\centering\includegraphics[width=#1\linewidth,height=#2\textheight,keepaspectratio]{#3}\par}\smallskip}
 \newcommand{\omittedwidget}[1]{\par{\small\color{accent} Interactive widget omitted: #1\par}}
 \begin{document}
 \color{ink}
@@ -189,7 +189,7 @@ impl<'a> Renderer<'a> {
                 ))
             })
             .collect();
-        let image_height = if document
+        let fallback_image_height = if document
             .descendants()
             .filter(|n| name(*n) == "1widgetNode")
             .count()
@@ -247,7 +247,7 @@ impl<'a> Renderer<'a> {
                         flush_line(tex, &mut line, has_words, math_count)?;
                         has_words = false;
                         math_count = 0;
-                        self.image(archive, node, image_height, tex)?;
+                        self.image(archive, node, fallback_image_height, tex)?;
                     }
                     "0el" => {
                         let parts = math_box(node, self.options.style)?;
@@ -284,7 +284,7 @@ impl<'a> Renderer<'a> {
         &mut self,
         archive: &Archive<'_>,
         node: Node<'_, '_>,
-        height: &str,
+        fallback_height: &str,
         tex: &mut String,
     ) -> Result<()> {
         let widget = children(node)
@@ -364,8 +364,27 @@ impl<'a> Renderer<'a> {
             self.assets.insert(key.clone(), filename);
         }
         self.stats.images += 1;
-        writeln!(tex, r"\noteimage{{{height}}}{{{}}}", self.assets[&key])?;
+        let (width, height) = note_image_dimensions(widget, fallback_height);
+        writeln!(
+            tex,
+            r"\noteimage{{{width:.6}}}{{{height}}}{{{}}}",
+            self.assets[&key]
+        )?;
         Ok(())
+    }
+}
+
+fn note_image_dimensions<'a>(widget: Node<'_, '_>, fallback_height: &'a str) -> (f64, &'a str) {
+    const MAX_WIDTH: f64 = 0.94;
+    let width_ratio = children(widget)
+        .find(|node| node.has_tag_name("ratiow"))
+        .and_then(|node| node.text())
+        .and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|ratio| ratio.is_finite() && *ratio > 0.0);
+    match width_ratio {
+        // Map the saved fraction of the Notes pane to the printable image width.
+        Some(ratio) => ((ratio.min(1.0) * MAX_WIDTH).max(0.000001), ".90"),
+        None => (MAX_WIDTH, fallback_height),
     }
 }
 
@@ -949,6 +968,22 @@ pub(crate) fn display_unit(token: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_size_uses_the_saved_pane_width_with_a_legacy_fallback() {
+        for (xml, expected) in [
+            ("<wdgt><ratiow>0.5</ratiow></wdgt>", (0.47, ".90")),
+            ("<wdgt><ratiow>1.25</ratiow></wdgt>", (0.94, ".90")),
+            ("<wdgt><ratiow>NaN</ratiow></wdgt>", (0.94, ".245")),
+            ("<wdgt/>", (0.94, ".245")),
+        ] {
+            let widget = Document::parse(xml).unwrap();
+            assert_eq!(
+                note_image_dimensions(widget.root_element(), ".245"),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn nested_graph_controls_are_not_app_panes() {
