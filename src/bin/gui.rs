@@ -1,8 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText};
-use nspire_pdf::{ConversionStage, ExportOptions, MathStyle, Stats};
-use rfd::FileDialog;
+use nspire_pdf::{ConversionStage, ExportOptions, MathStyle, OutputPolicy, Stats};
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -182,7 +182,7 @@ impl Converter {
         )
     }
 
-    fn choose_destination(&mut self) -> Option<PathBuf> {
+    fn choose_destination(&mut self) -> Option<(PathBuf, OutputPolicy)> {
         let Some(suggested) = self.suggested_destination() else {
             self.status = Status::Failed("Enter a valid PDF filename without a folder.".into());
             return None;
@@ -195,13 +195,31 @@ impl Converter {
             dialog = dialog.set_file_name(name.to_string_lossy());
         }
         let mut path = dialog.save_file()?;
-        if path.extension().is_none() {
+        let needs_extension = path.extension().is_none();
+        if needs_extension {
             path.set_extension("pdf");
         }
-        Some(path)
+        let policy = if path.exists() {
+            // A Save As confirmation only covers the exact filename returned by the dialog.
+            if needs_extension
+                && MessageDialog::new()
+                    .set_title("Confirm Save As")
+                    .set_level(MessageLevel::Warning)
+                    .set_description(format!("{} already exists. Replace it?", path.display()))
+                    .set_buttons(MessageButtons::YesNo)
+                    .show()
+                    != MessageDialogResult::Yes
+            {
+                return None;
+            }
+            OutputPolicy::ReplaceExisting
+        } else {
+            OutputPolicy::CreateNew
+        };
+        Some((path, policy))
     }
 
-    fn start(&mut self, ctx: &egui::Context, destination: PathBuf) {
+    fn start(&mut self, ctx: &egui::Context, destination: PathBuf, output_policy: OutputPolicy) {
         let sources = self.sources.clone();
         let ctx = ctx.clone();
         let options = ExportOptions {
@@ -212,10 +230,11 @@ impl Converter {
         let worker = thread::Builder::new()
             .name("pdf-converter".into())
             .spawn(move || {
-                let result = nspire_pdf::convert_files_with_options(
+                let result = nspire_pdf::convert_files_with_output_policy(
                     &sources,
                     &destination,
                     options,
+                    output_policy,
                     |stage| {
                         let _ = send.send(WorkerUpdate::Progress(stage));
                         ctx.request_repaint();
@@ -570,9 +589,9 @@ impl eframe::App for Converter {
                         _ => None,
                     };
                     if convert_button(ui, ready, progress, converted)
-                        && let Some(destination) = self.choose_destination()
+                        && let Some((destination, output_policy)) = self.choose_destination()
                     {
-                        self.start(ctx, destination);
+                        self.start(ctx, destination, output_policy);
                     }
                     ui.add_space(12.0);
                     self.status_ui(ui);

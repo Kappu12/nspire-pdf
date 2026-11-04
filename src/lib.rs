@@ -28,6 +28,12 @@ pub struct ExportOptions {
 }
 
 #[derive(Clone, Copy)]
+pub enum OutputPolicy {
+    CreateNew,
+    ReplaceExisting,
+}
+
+#[derive(Clone, Copy)]
 pub enum ConversionStage {
     Reading,
     Typesetting,
@@ -72,6 +78,16 @@ pub fn convert_files_with_options(
     inputs: &[impl AsRef<Path>],
     output: &Path,
     options: ExportOptions,
+    report: impl FnMut(ConversionStage),
+) -> Result<Stats> {
+    convert_files_with_output_policy(inputs, output, options, OutputPolicy::CreateNew, report)
+}
+
+pub fn convert_files_with_output_policy(
+    inputs: &[impl AsRef<Path>],
+    output: &Path,
+    options: ExportOptions,
+    output_policy: OutputPolicy,
     mut report: impl FnMut(ConversionStage),
 ) -> Result<Stats> {
     ensure!(!inputs.is_empty(), "choose at least one TI-Nspire file");
@@ -100,7 +116,7 @@ pub fn convert_files_with_options(
         output_dir.display()
     );
     ensure!(
-        !output.exists(),
+        !matches!(output_policy, OutputPolicy::CreateNew) || !output.exists(),
         "output already exists: {}",
         output.display()
     );
@@ -132,11 +148,25 @@ pub fn convert_files_with_options(
     compile(work.path())?;
 
     report(ConversionStage::Saving);
-    let mut pdf = fs::File::open(work.path().join("document.pdf"))?;
+    let pdf = fs::File::open(work.path().join("document.pdf"))?;
+    save_pdf(pdf, output, output_dir, output_policy)?;
+    Ok(stats)
+}
+
+fn save_pdf(
+    mut pdf: impl Read,
+    output: &Path,
+    output_dir: &Path,
+    output_policy: OutputPolicy,
+) -> Result<()> {
     let mut staging = tempfile::NamedTempFile::new_in(output_dir)?;
     io::copy(&mut pdf, staging.as_file_mut())?;
-    staging.persist_noclobber(output)?;
-    Ok(stats)
+    match output_policy {
+        OutputPolicy::CreateNew => staging.persist_noclobber(output),
+        OutputPolicy::ReplaceExisting => staging.persist(output),
+    }
+    .with_context(|| format!("saving {}", output.display()))?;
+    Ok(())
 }
 
 fn read_input(input: &Path) -> Result<Vec<u8>> {
@@ -213,4 +243,53 @@ fn default_compiler(_work: &Path) -> Result<std::ffi::OsString> {
             sibling.is_file().then(|| sibling.into_os_string())
         })
         .unwrap_or_else(|| "tectonic".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_overwrite_replaces_only_after_the_new_pdf_is_copied() {
+        struct BrokenReader;
+
+        impl Read for BrokenReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("simulated read failure"))
+            }
+        }
+
+        let folder = tempfile::tempdir().unwrap();
+        let output = folder.path().join("notes.pdf");
+        fs::write(&output, b"original PDF").unwrap();
+        assert!(
+            save_pdf(
+                &b"new PDF"[..],
+                &output,
+                folder.path(),
+                OutputPolicy::CreateNew
+            )
+            .is_err()
+        );
+        let partial = (&b"partial PDF"[..]).chain(BrokenReader);
+        assert!(
+            save_pdf(
+                partial,
+                &output,
+                folder.path(),
+                OutputPolicy::ReplaceExisting
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"original PDF");
+
+        save_pdf(
+            &b"new PDF"[..],
+            &output,
+            folder.path(),
+            OutputPolicy::ReplaceExisting,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"new PDF");
+    }
 }
