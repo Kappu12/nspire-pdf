@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText};
-use nspire_pdf::{MathStyle, Stats};
+use nspire_pdf::{ConversionStage, MathStyle, Stats};
 use rfd::FileDialog;
 use std::{
     env,
@@ -44,11 +44,19 @@ fn main() -> eframe::Result {
 
 type Outcome = Result<(PathBuf, Stats), String>;
 
+enum WorkerUpdate {
+    Progress(ConversionStage),
+    Finished(Outcome),
+}
+
 #[derive(Default)]
 enum Status {
     #[default]
     Idle,
-    Working(Receiver<Outcome>),
+    Working {
+        receiver: Receiver<WorkerUpdate>,
+        stage: ConversionStage,
+    },
     Done(PathBuf, Stats),
     Failed(String),
 }
@@ -116,23 +124,34 @@ impl Converter {
         let worker = thread::Builder::new()
             .name("pdf-converter".into())
             .spawn(move || {
-                let result = nspire_pdf::convert_with_style(&source, &destination, style)
+                let result =
+                    nspire_pdf::convert_with_progress(&source, &destination, style, |stage| {
+                        let _ = send.send(WorkerUpdate::Progress(stage));
+                        ctx.request_repaint();
+                    })
                     .map(|stats| (destination, stats))
                     .map_err(|error| format!("{error:#}"));
-                let _ = send.send(result);
+                let _ = send.send(WorkerUpdate::Finished(result));
                 ctx.request_repaint();
             });
         self.status = match worker {
-            Ok(_) => Status::Working(receive),
+            Ok(_) => Status::Working {
+                receiver: receive,
+                stage: ConversionStage::Reading,
+            },
             Err(error) => Status::Failed(format!("Could not start conversion. {error}")),
         };
     }
 
     fn update_status(&mut self) {
-        if let Status::Working(receiver) = &self.status {
+        while let Status::Working { receiver, stage } = &mut self.status {
             self.status = match receiver.try_recv() {
-                Ok(Ok((path, stats))) => Status::Done(path, stats),
-                Ok(Err(error)) => Status::Failed(error),
+                Ok(WorkerUpdate::Progress(current)) => {
+                    *stage = current;
+                    continue;
+                }
+                Ok(WorkerUpdate::Finished(Ok((path, stats)))) => Status::Done(path, stats),
+                Ok(WorkerUpdate::Finished(Err(error))) => Status::Failed(error),
                 Err(TryRecvError::Disconnected) => {
                     Status::Failed("The converter stopped unexpectedly.".into())
                 }
@@ -148,12 +167,7 @@ impl Converter {
                     RichText::new("A4 PDF with selectable text and typeset math.").color(MUTED),
                 );
             }
-            Status::Working(_) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Preparing your PDF…");
-                });
-            }
+            Status::Working { .. } => {}
             Status::Done(path, stats) => {
                 let clicked = ui
                     .horizontal(|ui| {
@@ -188,7 +202,11 @@ impl Converter {
 impl eframe::App for Converter {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.update_status();
-        let working = matches!(self.status, Status::Working(_));
+        let stage = match self.status {
+            Status::Working { stage, .. } => Some(stage),
+            _ => None,
+        };
+        let working = stage.is_some();
         let file_hover = !working
             && ctx.input(|input| {
                 self.accept_drops(&input.raw.dropped_files);
@@ -198,7 +216,6 @@ impl eframe::App for Converter {
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(26))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.label(RichText::new("TI-NSPIRE NOTES").size(12.0).strong());
                     ui.heading(RichText::new("Convert to PDF").size(29.0).strong());
                     ui.label(
                         RichText::new("Choose or drop a .tns file to make a print-ready PDF.")
@@ -242,22 +259,8 @@ impl eframe::App for Converter {
                         });
                     });
                     ui.add_space(17.0);
-                    let convert = egui::Button::new((
-                        egui::Atom::grow(),
-                        RichText::new(if working {
-                            "Converting…"
-                        } else {
-                            "Convert to PDF"
-                        })
-                        .strong()
-                        .color(BACKGROUND),
-                        egui::Atom::grow(),
-                    ))
-                    .fill(FOREGROUND)
-                    .corner_radius(8)
-                    .min_size(egui::vec2(ui.available_width(), 38.0));
                     let ready = !working && self.source.is_some() && self.destination.is_some();
-                    if ui.add_enabled(ready, convert).clicked() {
+                    if convert_button(ui, ready, stage) {
                         self.start(ctx);
                     }
                     ui.add_space(12.0);
@@ -272,6 +275,38 @@ fn is_tns(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("tns"))
 }
 
+fn convert_button(ui: &mut egui::Ui, ready: bool, stage: Option<ConversionStage>) -> bool {
+    let (label, progress) = match stage {
+        None => ("Convert to PDF", 0.0),
+        Some(ConversionStage::Reading) => ("Reading notes…", 1.0 / 3.0),
+        Some(ConversionStage::Typesetting) => ("Typesetting PDF…", 2.0 / 3.0),
+        Some(ConversionStage::Saving) => ("Saving PDF…", 1.0),
+    };
+    let (fill, text) = if stage.is_some() {
+        (SURFACE, FOREGROUND)
+    } else {
+        (FOREGROUND, BACKGROUND)
+    };
+    let button = egui::Button::new((
+        egui::Atom::grow(),
+        RichText::new(label).strong().color(text),
+        egui::Atom::grow(),
+    ))
+    .fill(fill)
+    .corner_radius(8)
+    .min_size(egui::vec2(ui.available_width(), 38.0));
+    let response = ui.add_enabled(ready, button);
+    if stage.is_some() {
+        let edge = response.rect.shrink2(egui::vec2(7.0, 1.0));
+        ui.painter().hline(
+            edge.left()..=edge.left() + edge.width() * progress,
+            edge.bottom(),
+            egui::Stroke::new(2.0, FOREGROUND),
+        );
+    }
+    response.clicked()
+}
+
 fn source_target(ui: &mut egui::Ui, path: Option<&Path>, file_hover: bool) -> bool {
     let title = if file_hover {
         "Drop your .tns file"
@@ -280,32 +315,41 @@ fn source_target(ui: &mut egui::Ui, path: Option<&Path>, file_hover: bool) -> bo
     } else {
         "Drop a .tns file here"
     };
-    let mut label = egui::text::LayoutJob {
-        halign: egui::Align::Center,
-        ..Default::default()
-    };
-    label.append(
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 112.0),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            "Browse for a .tns file",
+        )
+    });
+    let highlight = file_hover || response.hovered() || response.has_focus();
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        10,
+        if highlight { LINE } else { SURFACE },
+        egui::Stroke::new(1.0, if highlight { FOREGROUND } else { LINE }),
+        egui::StrokeKind::Inside,
+    );
+    let center = rect.center();
+    painter.text(
+        center - egui::vec2(0.0, 10.0),
+        egui::Align2::CENTER_CENTER,
         title,
-        0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(19.0), FOREGROUND),
+        egui::FontId::proportional(19.0),
+        FOREGROUND,
     );
-    label.append(
-        "\nor click to browse",
-        0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(14.0), MUTED),
+    painter.text(
+        center + egui::vec2(0.0, 13.0),
+        egui::Align2::CENTER_CENTER,
+        "or click to browse",
+        egui::FontId::proportional(14.0),
+        MUTED,
     );
-    let button = egui::Button::new((egui::Atom::grow(), label, egui::Atom::grow()))
-        .fill(if file_hover { LINE } else { SURFACE })
-        .stroke(egui::Stroke::new(
-            1.0,
-            if file_hover { FOREGROUND } else { LINE },
-        ))
-        .corner_radius(10)
-        .min_size(egui::vec2(ui.available_width(), 112.0));
-    let clicked = ui
-        .add(button)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked();
     if let Some(path) = path {
         let filename = path
             .file_name()
@@ -317,7 +361,9 @@ fn source_target(ui: &mut egui::Ui, path: Option<&Path>, file_hover: bool) -> bo
         )
         .on_hover_text(path.display().to_string());
     }
-    clicked
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 fn default_destination(source: &Path, style: MathStyle) -> PathBuf {

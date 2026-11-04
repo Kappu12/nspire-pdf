@@ -21,11 +21,27 @@ pub enum MathStyle {
     Lean,
 }
 
+#[derive(Clone, Copy)]
+pub enum ConversionStage {
+    Reading,
+    Typesetting,
+    Saving,
+}
+
 pub fn convert(input: &Path, output: &Path) -> Result<Stats> {
     convert_with_style(input, output, MathStyle::Latex)
 }
 
 pub fn convert_with_style(input: &Path, output: &Path, style: MathStyle) -> Result<Stats> {
+    convert_with_progress(input, output, style, |_| {})
+}
+
+pub fn convert_with_progress(
+    input: &Path,
+    output: &Path,
+    style: MathStyle,
+    mut report: impl FnMut(ConversionStage),
+) -> Result<Stats> {
     if input
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("tnsp"))
@@ -53,6 +69,7 @@ pub fn convert_with_style(input: &Path, output: &Path, style: MathStyle) -> Resu
         output.display()
     );
 
+    report(ConversionStage::Reading);
     let source = read_input(input)?;
     let archive = Archive::parse(&source)?;
     let work = tempfile::tempdir()?;
@@ -63,8 +80,10 @@ pub fn convert_with_style(input: &Path, output: &Path, style: MathStyle) -> Resu
     let (tex, stats) = latex::render(&archive, &title, work.path(), style)?;
     fs::write(work.path().join("document.tex"), tex)?;
 
+    report(ConversionStage::Typesetting);
     compile(work.path())?;
 
+    report(ConversionStage::Saving);
     let mut pdf = fs::File::open(work.path().join("document.pdf"))?;
     let mut staging = tempfile::NamedTempFile::new_in(output_dir)?;
     io::copy(&mut pdf, staging.as_file_mut())?;
