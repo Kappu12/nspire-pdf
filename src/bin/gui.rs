@@ -11,13 +11,11 @@ use std::{
 };
 
 const TITLE: &str = "Nspire PDF";
-const ACCENT: Color32 = Color32::from_rgb(111, 222, 201);
-const PRIMARY: Color32 = Color32::from_rgb(21, 108, 99);
-const INK: Color32 = Color32::from_rgb(236, 244, 246);
-const MUTED: Color32 = Color32::from_rgb(164, 182, 190);
-const LINE: Color32 = Color32::from_rgb(53, 70, 80);
-const SURFACE: Color32 = Color32::from_rgb(31, 43, 51);
-const BACKGROUND: Color32 = Color32::from_rgb(20, 29, 36);
+const FOREGROUND: Color32 = Color32::WHITE;
+const MUTED: Color32 = Color32::from_gray(170);
+const LINE: Color32 = Color32::from_gray(46);
+const SURFACE: Color32 = Color32::from_gray(19);
+const BACKGROUND: Color32 = Color32::from_gray(9);
 const ERROR: Color32 = Color32::from_rgb(255, 161, 152);
 
 fn main() -> eframe::Result {
@@ -36,7 +34,7 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| {
             let mut visuals = egui::Visuals::dark();
-            visuals.override_text_color = Some(INK);
+            visuals.override_text_color = Some(FOREGROUND);
             visuals.selection.bg_fill = LINE;
             cc.egui_ctx.set_visuals(visuals);
             Ok(Box::new(app))
@@ -150,7 +148,7 @@ impl Converter {
                 let clicked = ui
                     .horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("PDF saved").strong().color(ACCENT));
+                            ui.label(RichText::new("PDF saved").strong());
                             ui.label(
                                 RichText::new(format!(
                                     "{} Notes sections · {} math boxes · {} images",
@@ -195,12 +193,7 @@ impl eframe::App for Converter {
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(26))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("TI-NSPIRE NOTES")
-                            .size(12.0)
-                            .strong()
-                            .color(ACCENT),
-                    );
+                    ui.label(RichText::new("TI-NSPIRE NOTES").size(12.0).strong());
                     ui.heading(RichText::new("Convert to PDF").size(29.0).strong());
                     ui.label(
                         RichText::new("Choose or drop a .tns file to make a print-ready PDF.")
@@ -257,10 +250,10 @@ impl eframe::App for Converter {
                             "Convert to PDF"
                         })
                         .strong()
-                        .color(Color32::WHITE),
+                        .color(BACKGROUND),
                         egui::Atom::grow(),
                     ))
-                    .fill(PRIMARY)
+                    .fill(FOREGROUND)
                     .corner_radius(8)
                     .min_size(egui::vec2(ui.available_width(), 38.0));
                     let ready = !working && self.source.is_some() && self.destination.is_some();
