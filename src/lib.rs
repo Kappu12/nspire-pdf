@@ -153,7 +153,7 @@ pub fn convert_files_with_intro(
                 .file_stem()
                 .context("input needs a file name")?
                 .to_string_lossy();
-            let heading = (intro.is_none() || inputs.len() > 1).then_some(title.as_ref());
+            let heading = intro.is_none().then_some(title.as_ref());
             renderer.append(&archive, heading)
         };
         if inputs.len() > 1 {

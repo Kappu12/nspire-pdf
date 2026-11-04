@@ -225,7 +225,7 @@ impl Converter {
 
     fn start(&mut self, ctx: &egui::Context, destination: PathBuf, output_policy: OutputPolicy) {
         let sources = self.sources.clone();
-        let title = self.document_title(&destination).into_owned();
+        let title = self.document_title(&destination);
         let markdown = self.markdown.clone();
         let ctx = ctx.clone();
         let options = ExportOptions {
@@ -264,17 +264,18 @@ impl Converter {
         };
     }
 
-    fn document_title<'a>(&'a self, destination: &'a Path) -> std::borrow::Cow<'a, str> {
+    fn document_title(&self, destination: &Path) -> String {
         self.title
             .as_deref()
             .map(str::trim)
             .filter(|title| !title.is_empty())
-            .map(std::borrow::Cow::Borrowed)
+            .map(str::to_owned)
             .unwrap_or_else(|| {
                 destination
                     .file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
+                    .replace('_', " ")
             })
     }
 
@@ -509,7 +510,7 @@ impl Converter {
         let mut title = self
             .title
             .clone()
-            .unwrap_or_else(|| self.document_title(&destination).into_owned());
+            .unwrap_or_else(|| self.document_title(&destination));
         let width = ui.available_width();
         let title_label = ui.label(RichText::new("PDF title").color(MUTED));
         if ui
@@ -1087,12 +1088,12 @@ mod tests {
         app.add_sources(["KPL_02.tns", "KPL_01.tns", "KPL_03.tns"].map(PathBuf::from));
         let path = app.suggested_destination().unwrap();
         assert_eq!(path, PathBuf::from("KPL_01-03.pdf"));
-        assert_eq!(app.document_title(&path), "KPL_01-03");
-        app.output_name = Some("Physics.pdf".into());
+        assert_eq!(app.document_title(&path), "KPL 01-03");
+        app.output_name = Some("Physics_Notes.pdf".into());
         let path = app.suggested_destination().unwrap();
-        assert_eq!(app.document_title(&path), "Physics");
-        app.title = Some("Exam review".into());
-        assert_eq!(app.document_title(&path), "Exam review");
+        assert_eq!(app.document_title(&path), "Physics Notes");
+        app.title = Some("Exam_review".into());
+        assert_eq!(app.document_title(&path), "Exam_review");
         assert_eq!(
             numbered_batch_name(&["KPL_1.tns", "KPL_3.tns"].map(PathBuf::from)),
             None
