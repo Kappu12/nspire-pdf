@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
+    time::Duration,
 };
 
 const TITLE: &str = "Nspire PDF";
@@ -276,11 +277,11 @@ fn is_tns(path: &Path) -> bool {
 }
 
 fn convert_button(ui: &mut egui::Ui, ready: bool, stage: Option<ConversionStage>) -> bool {
-    let (label, progress) = match stage {
-        None => ("Convert to PDF", 0.0),
-        Some(ConversionStage::Reading) => ("Reading notes…", 1.0 / 3.0),
-        Some(ConversionStage::Typesetting) => ("Typesetting PDF…", 2.0 / 3.0),
-        Some(ConversionStage::Saving) => ("Saving PDF…", 1.0),
+    let label = match stage {
+        None => "Convert to PDF",
+        Some(ConversionStage::Reading) => "Reading notes…",
+        Some(ConversionStage::Typesetting) => "Typesetting PDF…",
+        Some(ConversionStage::Saving) => "Saving PDF…",
     };
     let (fill, text) = if stage.is_some() {
         (SURFACE, FOREGROUND)
@@ -298,11 +299,18 @@ fn convert_button(ui: &mut egui::Ui, ready: bool, stage: Option<ConversionStage>
     let response = ui.add_enabled(ready, button);
     if stage.is_some() {
         let edge = response.rect.shrink2(egui::vec2(7.0, 1.0));
+        // The compiler provides no completion estimate, so animate an activity line.
+        let time = ui.input(|input| input.time);
+        let angle = time * std::f64::consts::TAU / 2.4;
+        let position = (0.5 - 0.5 * angle.cos()) as f32;
+        let length = edge.width() * 0.22;
+        let start = edge.left() + (edge.width() - length) * position;
         ui.painter().hline(
-            edge.left()..=edge.left() + edge.width() * progress,
+            start..=start + length,
             edge.bottom(),
             egui::Stroke::new(2.0, FOREGROUND),
         );
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
     }
     response.clicked()
 }
