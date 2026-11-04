@@ -38,6 +38,23 @@ math. Both modes use Tectonic for page layout, and both preserve the saved
 calculator results. Lean mode formats syntax without evaluating or proving it.
 Install Lean 4 on PATH or set LEAN to the absolute path of the Lean executable.
 
+## Release builds
+
+Push a new version tag to publish the desktop and CLI packages:
+
+    git tag -a v0.1.0 -m "Release v0.1.0"
+    git push origin v0.1.0
+
+The workflow publishes Windows x64, Linux x64, and macOS packages for Apple
+Silicon and Intel. Tags such as v0.1.0-rc.1 publish as prereleases. Packages
+go directly to GitHub Releases.
+
+Install Tectonic separately before converting a file. On macOS, the app bundle
+is ad-hoc signed and lacks notarization. If Tectonic is available only in your
+terminal PATH, launch the app from the extracted folder with:
+
+    TECTONIC="$(command -v tectonic)" "./Nspire PDF.app/Contents/MacOS/nspire-pdf-gui"
+
 ## Supported content
 
 - TI-Nspire .tns containers with stored, deflated, or TI method 13 entries.

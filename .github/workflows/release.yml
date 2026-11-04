@@ -1,0 +1,152 @@
+name: Release desktop builds
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  TAG_NAME: ${{ github.ref_name }}
+  RUST_VERSION: '1.95.0'
+
+jobs:
+  prepare:
+    if: github.event.created && !github.event.deleted
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      build: ${{ steps.draft.outputs.build }}
+    steps:
+      - name: Prepare draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            echo "build=$is_draft" >> "$GITHUB_OUTPUT"
+          else
+            args=(--verify-tag --draft --generate-notes --title "$TAG_NAME")
+            if [[ "$TAG_NAME" == *-* ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$TAG_NAME" "${args[@]}"
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            extension: zip
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            extension: tar.gz
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            extension: zip
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            extension: zip
+    env:
+      TARGET: ${{ matrix.target }}
+      PACKAGE: nspire-pdf-${{ github.ref_name }}-${{ matrix.target }}
+      ASSET: nspire-pdf-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.extension }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+
+      - name: Build and test
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
+          cargo "+$RUST_VERSION" build --release --locked --features gui --target "$TARGET"
+          cargo "+$RUST_VERSION" test --release --locked --features gui --target "$TARGET"
+
+      - name: Package Windows executables
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $release = "target/$env:TARGET/release"
+          New-Item -ItemType Directory -Path $env:PACKAGE | Out-Null
+          Copy-Item -LiteralPath "$release/nspire-pdf.exe","$release/nspire-pdf-gui.exe","README.md","LICENSE-TnsTools" -Destination $env:PACKAGE
+          Compress-Archive -LiteralPath $env:PACKAGE -DestinationPath $env:ASSET
+
+      - name: Package Linux binaries
+        if: runner.os == 'Linux'
+        run: |
+          release="target/$TARGET/release"
+          mkdir "$PACKAGE"
+          cp "$release/nspire-pdf" "$release/nspire-pdf-gui" README.md LICENSE-TnsTools "$PACKAGE/"
+          tar -czf "$ASSET" "$PACKAGE"
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          release="target/$TARGET/release"
+          app="$PACKAGE/Nspire PDF.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp "$release/nspire-pdf-gui" "$app/Contents/MacOS/"
+          cp "$release/nspire-pdf" README.md LICENSE-TnsTools "$PACKAGE/"
+          version="${TAG_NAME#v}"
+          version="${version%%-*}"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key><string>com.kappu12.nspire-pdf</string>
+            <key>CFBundleName</key><string>Nspire PDF</string>
+            <key>CFBundleExecutable</key><string>nspire-pdf-gui</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
+            <key>CFBundleVersion</key><string>$GITHUB_RUN_NUMBER</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --force --sign - "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$PACKAGE" "$ASSET"
+
+      - name: Upload directly to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG_NAME" "./$ASSET" --clobber
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the completed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG_NAME" --draft=false
