@@ -6,8 +6,10 @@ use std::{collections::BTreeMap, fmt::Write, io::Cursor, path::Path};
 
 const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
 \usepackage[margin=23mm,top=24mm,bottom=24mm]{geometry}
-\usepackage{amsmath,unicode-math,graphicx,xcolor,needspace}
+\usepackage{amsmath,unicode-math,graphicx,xcolor,needspace,fontawesome5}
 \setmathfont{latinmodern-math.otf}
+\newfontface\nspiresymbolfont{DejaVuSans.ttf}
+\newcommand{\nspiresymbol}[1]{{\nspiresymbolfont #1}}
 \definecolor{ink}{HTML}{101720}
 \definecolor{accent}{HTML}{245166}
 \definecolor{rulecolor}{HTML}{BDC9CF}
@@ -203,7 +205,7 @@ impl Renderer<'_> {
                 match name(node) {
                     "1word" => {
                         let word = node.text().unwrap_or("");
-                        let body = escape(word);
+                        let body = escape_note_word(word);
                         let style = formats
                             .get(node.attribute("id0").unwrap_or(""))
                             .copied()
@@ -599,24 +601,132 @@ fn math_slot(value: &str, style: MathStyle) -> &str {
     }
 }
 
+fn escape_note_word(word: &str) -> String {
+    // TI escapes literal backslashes in rich-text words before serializing them.
+    if word.contains(r"\\") {
+        escape(&word.replace(r"\\", r"\"))
+    } else {
+        escape(word)
+    }
+}
+
 pub(crate) fn escape(text: &str) -> String {
     let mut out = String::new();
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(first) = decode_superscript(ch) {
+            let script: String = std::iter::once(first)
+                .chain(std::iter::from_fn(|| {
+                    chars
+                        .next_if(|&c| decode_superscript(c).is_some())
+                        .and_then(decode_superscript)
+                }))
+                .collect();
+            out.push_str(r"\ensuremath{{}^{");
+            out.push_str(&script);
+            out.push_str("}}");
+            continue;
+        }
         match ch {
             '\\' => out.push_str(r"\textbackslash{}"),
+            '\'' => out.push_str(r"\textquotesingle{}"),
+            '"' => out.push_str(r"\textquotedbl{}"),
+            '`' => out.push_str(r"\char96\relax"),
             '~' => out.push_str(r"\textasciitilde{}"),
             '^' => out.push_str(r"\textasciicircum{}"),
             '⇔' => out.push_str(r"\ensuremath{\Leftrightarrow}"),
             '⇒' => out.push_str(r"\ensuremath{\Rightarrow}"),
             '−' => out.push_str(r"\ensuremath{-}"),
+            '\u{f000}' => out.push('E'),
+            '\u{2009}' => out.push_str(r"\,"),
+            'ĸ' | 'ŉ' | 'Ŧ' | 'ŧ' | '‣' => {
+                out.push_str(r"\nspiresymbol{");
+                out.push(ch);
+                out.push('}');
+            }
             '#' | '$' | '%' | '&' | '_' | '{' | '}' => {
                 out.push('\\');
                 out.push(ch);
             }
-            _ => out.push(ch),
+            ch if decode_subscript(ch).is_some() => {
+                out.push_str(r"\ensuremath{{}_{");
+                out.extend(decode_subscript(ch));
+                out.push_str("}}");
+            }
+            ch => match math_symbol(ch) {
+                Some(symbol) => {
+                    out.push_str(r"\ensuremath{");
+                    out.push_str(symbol);
+                    out.push('}');
+                }
+                None if is_math_symbol(ch) => {
+                    out.push_str(r"\ensuremath{");
+                    out.push(ch);
+                    out.push('}');
+                }
+                None => out.push(ch),
+            },
         }
     }
     out
+}
+
+fn math_symbol(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        // TI's palette uses private-use characters for these glyphs.
+        '\u{f001}' => r"{}^{\mathrm{r}}",
+        '\u{f002}' => r"{}^{\mathsf{T}}",
+        '\u{f003}' => r"\bar{x}",
+        '\u{f004}' | 'ȳ' => r"\bar{y}",
+        '\u{f005}' => r"{}^{-1}",
+        '\u{f008}' => r"\mathrm{d}",
+        '\u{f021}' => r"\mathsf{F}",
+        '\u{f02f}' | 'ⅈ' => r"\mathrm{i}",
+        '\u{f03f}' | 'ℯ' => r"\mathrm{e}",
+        '\u{f040}' => r"{}^{\mathrm{g}}",
+        '\u{f041}' => "c",
+        '\u{f042}' => "n",
+        '\u{f044}' => r"\hat{p}",
+        '\u{f045}' => "10",
+        '\u{f112}' => r"\text{\nspiresymbol{↳}}",
+        '\u{f100}' => r"\text{\faIcon{wrench}}",
+        '\u{f101}' => r"\text{\faIcon{mouse-pointer}}",
+        '\u{f102}' => r"\text{\faIcon{hand-paper}}",
+        '\u{f103}' => r"\text{\nspiresymbol{⚐}}",
+        '\u{f104}' => r"\text{\faIcon{book-open}}",
+        '\u{f105}' => r"\text{\nspiresymbol{◑▸}}",
+        '\u{f106}' => r"\text{\nspiresymbol{◂◐}}",
+        'ŷ' => r"\hat{y}",
+        'µ' => r"\mu ",
+        '∆' => r"\Delta ",
+        '√' => r"\text{\nspiresymbol{√}}",
+        '⇥' => r"\mathrel{\text{\nspiresymbol{⇥}}}",
+        '◿' => r"\text{\nspiresymbol{◿}}",
+        '▴' => r"\text{\nspiresymbol{▴}}",
+        '▸' => r"\text{\nspiresymbol{▸}}",
+        '▾' => r"\text{\nspiresymbol{▾}}",
+        '◂' => r"\text{\nspiresymbol{◂}}",
+        '◆' => r"\text{\nspiresymbol{◆}}",
+        '►' => r"\text{\nspiresymbol{►}}",
+        '☺' => r"\text{\nspiresymbol{☺}}",
+        '★' => r"\text{\nspiresymbol{★}}",
+        '⫽' => r"\mathbin{/\mkern-4mu/}",
+        '¼' => r"\tfrac{1}{4}",
+        '½' => r"\tfrac{1}{2}",
+        '¾' => r"\tfrac{3}{4}",
+        _ => return None,
+    })
+}
+
+fn is_math_symbol(ch: char) -> bool {
+    matches!(
+        ch,
+        'Α'..='Ρ' | 'Σ'..='Ω' | 'α'..='ω' | 'ϑ' | 'ϕ' | 'ϖ' | 'ϱ' | 'ϵ'
+            | 'ℂ' | 'ℎ' | 'ℏ' | 'ℕ' | 'ℙ' | 'ℚ' | 'ℝ' | 'ℤ'
+            | '¬' | '±' | '′' | '″'
+            | '\u{2190}'..='\u{22ff}'
+            | '▪' | '▫' | '▲' | '△' | '▶' | '▷' | '▼' | '◀' | '✓' | '□'
+    )
 }
 
 fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
@@ -636,12 +746,21 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             }
             continue;
         }
+        if let Some(first) = decode_superscript(ch) {
+            out.push_str("^{");
+            out.push(first);
+            while let Some(next) = chars.next_if(|&c| decode_superscript(c).is_some()) {
+                out.extend(decode_superscript(next));
+            }
+            out.push('}');
+            continue;
+        }
         match ch {
             '*' if chars.peek() == Some(&'_') && {
                 let token: String = chars
                     .clone()
                     .skip(1)
-                    .take_while(char::is_ascii_alphabetic)
+                    .take_while(|&ch| unit_character(ch))
                     .collect();
                 display_unit(&token).is_some()
             } =>
@@ -651,9 +770,15 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             '*' | '·' | '•' => out.push_str(r"\cdot "),
             '×' => out.push_str(r"\times "),
             '÷' => out.push_str(r"\div "),
+            '\'' => {
+                out.push_str(r"{}^{\prime");
+                while chars.next_if_eq(&'\'').is_some() {
+                    out.push_str(r"\prime");
+                }
+                out.push('}');
+            }
             '−' => out.push('-'),
             '▶' | '►' | '▸' => out.push_str(r"\mathbin{\triangleright}"),
-            '\u{f03f}' => out.push_str(r"\mathrm{e}"),
             '\u{f000}' => {
                 let sign = chars.next_if(|c| matches!(c, '+' | '-' | '−'));
                 let exponent: String =
@@ -667,8 +792,6 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
                 }
             }
             '\u{f005}' => out.push_str("^{-1}"),
-            '\u{f041}' => out.push('c'),
-            '\u{f042}' => out.push('n'),
             'λ' => out.push_str(r"\lambda "),
             'μ' => out.push_str(r"\mu "),
             'ρ' => out.push_str(r"\rho "),
@@ -680,46 +803,50 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             '≠' => out.push_str(r"\ne "),
             '≈' => out.push_str(r"\approx "),
             '⇔' => out.push_str(r"\Leftrightarrow "),
-            'µ' => out.push_str(r"\mu "),
-            '∆' => out.push_str(r"\Delta "),
             '°' => out.push_str(r"^{\circ}"),
-            'Α'..='Ω'
-            | 'α'..='ω'
-            | '±'
-            | 'ℕ'
-            | 'ℤ'
-            | 'ℚ'
-            | 'ℝ'
-            | 'ℂ'
-            | '\u{2190}'..='\u{22ff}'
-            | '²'
-            | '⁺'
-            | '⁻' => out.push(ch),
             '_' if chars.next_if_eq(&'°').is_some() => {
                 let unit: String =
                     std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
                 write!(out, r"\,{{}}^{{\circ}}\mathrm{{{unit}}}")?;
             }
-            '_' if chars.peek().is_some_and(char::is_ascii_alphabetic) => {
+            '_' if chars
+                .peek()
+                .is_some_and(|&c| unit_character(c) && !c.is_ascii_digit()) =>
+            {
                 let token: String =
-                    std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
+                    std::iter::from_fn(|| chars.next_if(|&c| unit_character(c))).collect();
                 if out.ends_with(|ch: char| ch.is_ascii_digit()) {
                     out.push_str(r"\,");
                 }
                 let token = display_unit(&token).unwrap_or(&token);
-                write!(out, r"\mathrm{{{token}}}")?;
+                if token.is_ascii() {
+                    write!(out, r"\mathrm{{{token}}}")?;
+                } else {
+                    write!(out, r"\symup{{{token}}}")?;
+                }
             }
             'a'..='z' | 'A'..='Z' => {
-                let word: String = std::iter::once(ch)
+                let mut word: String = std::iter::once(ch)
                     .chain(std::iter::from_fn(|| {
-                        chars.next_if(char::is_ascii_alphabetic)
+                        chars.next_if(char::is_ascii_alphanumeric)
                     }))
                     .collect();
+                if let Some(mark) = chars.next_if(|c| matches!(c, '\u{0302}' | '\u{0304}')) {
+                    let base = word.pop().expect("nonempty ASCII word");
+                    let accent = if mark == '\u{0302}' { "hat" } else { "bar" };
+                    write!(out, r"{word}\{accent}{{{base}}}")?;
+                    continue;
+                }
                 match word.as_str() {
                     "ln" | "log" | "sin" | "cos" | "tan" | "exp" => write!(out, "\\{word} ")?,
                     "solve" => out.push_str(r"\operatorname{solve}"),
-                    "and" | "or" => write!(out, r"\quad\text{{{word}}}\quad")?,
+                    "and" | "or" | "xor" | "not" => write!(out, r"\quad\text{{{word}}}\quad")?,
                     "nm" | "pm" | "keV" | "eV" => write!(out, r"\mathrm{{{word}}}")?,
+                    _ if word.len() > 1
+                        && chars.clone().find(|c| !c.is_whitespace()) == Some('(') =>
+                    {
+                        write!(out, r"\operatorname{{{word}}}")?;
+                    }
                     _ => out.push_str(&word),
                 }
             }
@@ -742,7 +869,11 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             | '<'
             | '>'
             | '|' => out.push(ch),
-            ch => write!(out, r"\text{{{}}}", escape(&ch.to_string()))?,
+            ch => match math_symbol(ch) {
+                Some(symbol) => out.push_str(symbol),
+                None if is_math_symbol(ch) => out.push(ch),
+                None => write!(out, r"\text{{{}}}", escape(&ch.to_string()))?,
+            },
         }
     }
     Ok(out)
@@ -753,20 +884,50 @@ pub(crate) fn decode_subscript(ch: char) -> Option<char> {
         '₀'..='₉' => char::from_u32(ch as u32 - '₀' as u32 + '0' as u32),
         '\u{f841}'..='\u{f85a}' => char::from_u32(ch as u32 - 0xf841 + 'A' as u32),
         '\u{f861}'..='\u{f87a}' => char::from_u32(ch as u32 - 0xf861 + 'a' as u32),
-        '\u{f8b1}' => Some('α'),
-        '\u{f8b2}' => Some('β'),
-        '\u{f8bc}' => Some('μ'),
+        '\u{f891}'..='\u{f8a1}' | '\u{f8a3}'..='\u{f8a9}' | '\u{f8b1}'..='\u{f8c9}' => {
+            char::from_u32(ch as u32 - 0xf500)
+        }
         '₊' => Some('+'),
         '₋' => Some('-'),
+        '₍' => Some('('),
+        '₎' => Some(')'),
+        '\u{f043}' => Some('n'),
+        '\u{f046}' => Some('L'),
+        '\u{f047}' => Some('b'),
         _ => None,
     }
+}
+
+fn decode_superscript(ch: char) -> Option<char> {
+    match ch {
+        '⁰' => Some('0'),
+        '¹' => Some('1'),
+        '²' => Some('2'),
+        '³' => Some('3'),
+        '⁴'..='⁹' => char::from_u32(ch as u32 - '⁴' as u32 + '4' as u32),
+        '⁺' => Some('+'),
+        '⁻' => Some('-'),
+        '⁼' => Some('='),
+        '⁽' => Some('('),
+        '⁾' => Some(')'),
+        'ⁱ' => Some('i'),
+        'ⁿ' => Some('n'),
+        _ => None,
+    }
+}
+
+pub(crate) fn unit_character(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, 'µ' | 'μ' | 'ε' | 'σ' | 'φ' | 'ϕ' | 'Å')
 }
 
 pub(crate) fn display_unit(token: &str) -> Option<&str> {
     match token {
         "gm" => Some("g"),
         "kev" => Some("keV"),
-        "m" | "cm" | "mm" | "nm" | "pm" | "km" | "kg" | "eV" | "keV" | "MeV" => Some(token),
+        "m" | "cm" | "mm" | "dm" | "nm" | "pm" | "km" | "µm" | "μm" | "Å" | "in" | "ft" | "yd"
+        | "mi" | "kg" | "mg" | "µg" | "μg" | "lb" | "oz" | "s" | "ms" | "min" | "hr" | "day"
+        | "L" | "mL" | "mol" | "A" | "Hz" | "J" | "K" | "N" | "Pa" | "V" | "W" | "eV" | "keV"
+        | "MeV" => Some(token),
         _ => None,
     }
 }
@@ -803,6 +964,34 @@ mod tests {
         assert_eq!(
             math_text("_c*_h=20.4*_cm", false).unwrap(),
             r"\mathrm{c}\cdot \mathrm{h}=20.4\,\mathrm{cm}"
+        );
+    }
+
+    #[test]
+    fn renders_palette_symbols_in_notes_and_equations() {
+        assert_eq!(
+            escape("\u{f02f}\u{f002} α∈ℝ x⁻¹ \u{f043}"),
+            r"\ensuremath{\mathrm{i}}\ensuremath{{}^{\mathsf{T}}} \ensuremath{α}\ensuremath{∈}\ensuremath{ℝ} x\ensuremath{{}^{-1}} \ensuremath{{}_{n}}"
+        );
+        assert_eq!(
+            math_text("A\u{f002}x\u{f8c9}²+p\u{0302}", false).unwrap(),
+            r"A{}^{\mathsf{T}}x_{ω}^{2}+\hat{p}"
+        );
+    }
+
+    #[test]
+    fn renders_catalog_names_and_unicode_constants() {
+        assert_eq!(
+            math_text("ANOVA2way(x)+5*_μm+_ε0", false).unwrap(),
+            r"\operatorname{ANOVA2way}(x)+5\,\symup{μm}+\symup{ε0}"
+        );
+    }
+
+    #[test]
+    fn unescapes_backslashes_in_ti_notes_words() {
+        assert_eq!(
+            escape_note_word(r"\\ \\\\"),
+            r"\textbackslash{} \textbackslash{}\textbackslash{}"
         );
     }
 

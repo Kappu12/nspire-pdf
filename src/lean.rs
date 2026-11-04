@@ -46,34 +46,7 @@ pub fn format_document(tex: &str, expressions: &[String], work: &Path) -> Result
     for part in parts {
         let expression = expressions.next().context("missing output from Lean")?;
         output.push_str(r"\texttt{");
-        for character in expression.chars() {
-            let symbol = match character {
-                'λ' => r"\ensuremath{\lambda}",
-                'μ' => r"\ensuremath{\mu}",
-                'ρ' => r"\ensuremath{\rho}",
-                'π' => r"\ensuremath{\pi}",
-                'θ' => r"\ensuremath{\theta}",
-                '▷' => r"\ensuremath{\triangleright}",
-                '∧' => r"\ensuremath{\land}",
-                '∨' => r"\ensuremath{\lor}",
-                '≤' => r"\ensuremath{\leq}",
-                '≥' => r"\ensuremath{\geq}",
-                '≠' => r"\ensuremath{\ne}",
-                '≈' => r"\ensuremath{\approx}",
-                '∞' => r"\ensuremath{\infty}",
-                '₀'..='₉' => {
-                    output.push_str(r"\textsubscript{");
-                    output.push(char::from(b'0' + (character as u32 - '₀' as u32) as u8));
-                    output.push('}');
-                    continue;
-                }
-                _ => {
-                    output.push_str(&crate::latex::escape(&character.to_string()));
-                    continue;
-                }
-            };
-            output.push_str(symbol);
-        }
+        output.push_str(&crate::latex::escape(expression));
         output.push('}');
         output.push_str(part);
     }
@@ -124,9 +97,13 @@ pub fn text(input: &str, in_subscript: bool) -> String {
                     result.push_str(&format!("e{sign}{exponent}"));
                 }
             }
-            '_' if chars.peek().is_some_and(char::is_ascii_alphabetic) => {
+            '_' if chars
+                .peek()
+                .is_some_and(|&c| crate::latex::unit_character(c) && !c.is_ascii_digit()) =>
+            {
                 let name: String =
-                    std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
+                    std::iter::from_fn(|| chars.next_if(|&c| crate::latex::unit_character(c)))
+                        .collect();
                 if previous.is_some_and(|c: char| c.is_ascii_digit()) {
                     result.push_str(" * ");
                 }
