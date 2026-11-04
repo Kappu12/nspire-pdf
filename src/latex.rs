@@ -1,4 +1,5 @@
 use crate::archive::Archive;
+use crate::{MathStyle, lean};
 use anyhow::{Context, Result, bail, ensure};
 use roxmltree::{Document, Node};
 use std::{collections::BTreeMap, fmt::Write, io::Cursor, path::Path};
@@ -38,6 +39,8 @@ struct Renderer<'a> {
     work: &'a Path,
     assets: BTreeMap<String, String>,
     stats: Stats,
+    style: MathStyle,
+    expressions: Vec<String>,
 }
 
 fn name<'a>(node: Node<'a, '_>) -> &'a str {
@@ -48,15 +51,28 @@ fn children<'a, 'input>(node: Node<'a, 'input>) -> impl Iterator<Item = Node<'a,
     node.children().filter(Node::is_element)
 }
 
-pub fn render(archive: &Archive<'_>, title: &str, work: &Path) -> Result<(String, Stats)> {
+pub fn render(
+    archive: &Archive<'_>,
+    title: &str,
+    work: &Path,
+    style: MathStyle,
+) -> Result<(String, Stats)> {
     let mut renderer = Renderer {
         archive,
         work,
         assets: BTreeMap::new(),
         stats: Stats::default(),
+        style,
+        expressions: Vec::new(),
     };
     let mut tex = PREAMBLE.to_owned();
     writeln!(tex, r"{{\sffamily\huge\bfseries {}}}\par", escape(title))?;
+    let label = if style == MathStyle::Lean {
+        "Lean notation"
+    } else {
+        "LaTeX equations"
+    };
+    writeln!(tex, r"{{\sffamily\small\color{{accent}} {label}}}\par")?;
     let mut problems: Vec<_> = archive
         .0
         .iter()
@@ -104,6 +120,9 @@ pub fn render(archive: &Archive<'_>, title: &str, work: &Path) -> Result<(String
     }
     ensure!(renderer.stats.notes > 0, "no TI-Nspire Notes widgets found");
     tex.push_str("\\end{document}\n");
+    if style == MathStyle::Lean {
+        tex = lean::format_document(&tex, &renderer.expressions, work)?;
+    }
     Ok((tex, renderer.stats))
 }
 
@@ -170,14 +189,19 @@ impl Renderer<'_> {
                         self.image(node, image_height, tex)?;
                     }
                     "0el" => {
-                        let parts = math_box(node)?;
-                        for (i, part) in parts.iter().enumerate() {
+                        let parts = math_box(node, self.style)?;
+                        for (i, part) in parts.into_iter().enumerate() {
                             if i > 0 {
                                 line.push_str(r"\allowbreak\quad\(\mapsto\)\nobreak\;");
                             } else if !line.is_empty() && !line.ends_with(char::is_whitespace) {
                                 line.push_str(r"\allowbreak\ ");
                             }
-                            write!(line, r"\(\displaystyle {part}\)")?;
+                            if self.style == MathStyle::Lean {
+                                self.expressions.push(part.trim().to_owned());
+                                line.push(lean::SLOT);
+                            } else {
+                                write!(line, r"\(\displaystyle {part}\)")?;
+                            }
                         }
                         math_count += 1;
                         self.stats.math += 1;
@@ -320,34 +344,41 @@ fn flush_line(
     Ok(())
 }
 
-fn math_box(node: Node<'_, '_>) -> Result<Vec<String>> {
+fn math_box(node: Node<'_, '_>, style: MathStyle) -> Result<Vec<String>> {
     let parts: Vec<_> = children(node)
         .filter(|n| !n.has_tag_name("mbox"))
-        .map(math_node)
+        .map(|node| math_element(node, false, style))
         .collect::<Result<_>>()?;
-    Ok(parts.into_iter().filter(|s| !s.is_empty()).collect())
+    Ok(parts.into_iter().filter(|s| !s.trim().is_empty()).collect())
 }
 
-fn math_node(node: Node<'_, '_>) -> Result<String> {
-    math_element(node, false)
-}
-
-fn math_element(node: Node<'_, '_>, inside_subscript: bool) -> Result<String> {
+fn math_element(node: Node<'_, '_>, inside_subscript: bool, style: MathStyle) -> Result<String> {
     let args = |inside_subscript| {
         children(node)
-            .map(|child| math_element(child, inside_subscript))
+            .map(|child| math_element(child, inside_subscript, style))
             .collect::<Result<Vec<_>>>()
     };
     let kind = name(node);
     Ok(match kind {
         "0el" => args(inside_subscript)?.join(""),
-        "0text" | "0paren" => math_text(node.text().unwrap_or(""), inside_subscript)?,
+        "0text" | "0paren" => {
+            let text = node.text().unwrap_or("");
+            if style == MathStyle::Lean {
+                lean::text(text, inside_subscript)
+            } else {
+                math_text(text, inside_subscript)?
+            }
+        }
         "0fraction" => {
             let values = args(false)?;
             let [top, bottom] = values.as_slice() else {
                 bail!("expected two fraction operands");
             };
-            format!(r"\frac{{{top}}}{{{bottom}}}")
+            if style == MathStyle::Lean {
+                format!("({} / {})", lean::operand(top), lean::operand(bottom))
+            } else {
+                format!(r"\frac{{{top}}}{{{bottom}}}")
+            }
         }
         "0power" | "0mathSubscript" => {
             let operator = if kind == "0power" { '^' } else { '_' };
@@ -355,13 +386,21 @@ fn math_element(node: Node<'_, '_>, inside_subscript: bool) -> Result<String> {
             let [value] = values.as_slice() else {
                 bail!("expected one operand for {kind}");
             };
-            format!("{operator}{{{value}}}")
+            if style == MathStyle::Lean {
+                if operator == '^' {
+                    format!(" ^ {}", lean::operand(value))
+                } else {
+                    format!("_{value}")
+                }
+            } else {
+                format!("{operator}{{{value}}}")
+            }
         }
         other => bail!("unsupported math element {other}"),
     })
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         match ch {
@@ -487,7 +526,7 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
     Ok(out)
 }
 
-fn display_unit(token: &str) -> Option<&str> {
+pub(crate) fn display_unit(token: &str) -> Option<&str> {
     match token {
         "gm" => Some("g"),
         "kev" => Some("keV"),
@@ -519,6 +558,13 @@ mod tests {
     #[test]
     fn subscript_node_accepts_already_subscripted_digits() {
         let xml = Document::parse(r#"<node name="0mathSubscript"><node name="0el"><leaf name="0text">₀</leaf></node></node>"#).unwrap();
-        assert_eq!(math_node(xml.root_element()).unwrap(), "_{0}");
+        assert_eq!(
+            math_element(xml.root_element(), false, MathStyle::Latex).unwrap(),
+            "_{0}"
+        );
+        assert_eq!(
+            math_element(xml.root_element(), false, MathStyle::Lean).unwrap(),
+            "_0"
+        );
     }
 }

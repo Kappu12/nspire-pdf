@@ -11,9 +11,9 @@ Build the desktop app with:
 
     cargo build --release --features gui
 
-Launch nspire-pdf-gui from target/release. Choose a .tns file or drop one onto
-the window, check the PDF destination, and select Convert to PDF. Open PDF
-opens the result in your default viewer.
+Launch nspire-pdf-gui from target/release. Pick LaTeX or Lean for the math,
+choose or drop a .tns file, and select Convert to PDF. Open PDF opens the
+result in your default viewer.
 
 The app looks for Tectonic next to its executable or on PATH. The TECTONIC
 environment variable takes precedence.
@@ -25,10 +25,18 @@ Tectonic on PATH or set the TECTONIC environment variable to the absolute path
 of its executable. Tectonic may download its LaTeX bundle on first use.
 
     cargo run --release -- "path/to/notes.tns" "path/to/notes.pdf"
+    cargo run --release -- --lean "path/to/notes.tns" "path/to/notes-Lean.pdf"
 
-Omit the output argument to write beside the input with a .pdf extension.
+Omit the output argument to write beside the input. LaTeX is the default and
+writes .pdf, while Lean writes -Lean.pdf.
 The CLI refuses to overwrite an existing file. To build a standalone CLI
 executable, run cargo build --release. Tectonic is still required at runtime.
+
+LaTeX uses stacked fractions and conventional equation typography. Lean uses
+Lean 4 to format linear expressions and calculator fragments as code-style
+math. Both modes use Tectonic for page layout, and both preserve the saved
+calculator results. Lean mode formats syntax without evaluating or proving it.
+Install Lean 4 on PATH or set LEAN to the absolute path of the Lean executable.
 
 ## Supported content
 

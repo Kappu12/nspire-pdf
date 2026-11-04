@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText};
-use nspire_pdf::Stats;
+use nspire_pdf::{MathStyle, Stats};
 use rfd::FileDialog;
 use std::{
     env,
@@ -29,8 +29,8 @@ fn main() -> eframe::Result {
         TITLE,
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([560.0, 405.0])
-                .with_min_inner_size([475.0, 350.0])
+                .with_inner_size([560.0, 435.0])
+                .with_min_inner_size([475.0, 380.0])
                 .with_drag_and_drop(true),
             ..Default::default()
         },
@@ -60,6 +60,7 @@ struct Converter {
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
     status: Status,
+    style: MathStyle,
 }
 
 impl Converter {
@@ -72,14 +73,8 @@ impl Converter {
                 Status::Failed("Choose a TI-Nspire Notes file with a .tns extension.".into());
             return;
         }
-        let mut destination = path.with_extension("pdf");
-        if destination.exists() {
-            let mut name = path.file_stem().unwrap_or_default().to_os_string();
-            name.push("-print.pdf");
-            destination.set_file_name(name);
-        }
+        self.destination = Some(default_destination(&path, self.style));
         self.source = Some(path);
-        self.destination = Some(destination);
         self.status = Status::Idle;
     }
 
@@ -108,11 +103,12 @@ impl Converter {
             return;
         };
         let ctx = ctx.clone();
+        let style = self.style;
         let (send, receive) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("pdf-converter".into())
             .spawn(move || {
-                let result = nspire_pdf::convert(&source, &destination)
+                let result = nspire_pdf::convert_with_style(&source, &destination, style)
                     .map(|stats| (destination, stats))
                     .map_err(|error| format!("{error:#}"));
                 let _ = send.send(result);
@@ -213,6 +209,19 @@ impl eframe::App for Converter {
                     ui.add_space(17.0);
 
                     ui.add_enabled_ui(!working, |ui| {
+                        let previous = self.style;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Math style").strong());
+                            ui.selectable_value(&mut self.style, MathStyle::Latex, "LaTeX");
+                            ui.selectable_value(&mut self.style, MathStyle::Lean, "Lean");
+                        });
+                        if self.style != previous
+                            && let Some(source) = &self.source
+                        {
+                            self.destination = Some(default_destination(source, self.style));
+                            self.status = Status::Idle;
+                        }
+                        ui.add_space(9.0);
                         if file_row(
                             ui,
                             "Source document",
@@ -263,6 +272,17 @@ impl eframe::App for Converter {
                 });
             });
     }
+}
+
+fn default_destination(source: &Path, style: MathStyle) -> PathBuf {
+    let suffix = match style {
+        MathStyle::Lean => "-Lean.pdf",
+        MathStyle::Latex if source.with_extension("pdf").exists() => "-LaTeX.pdf",
+        MathStyle::Latex => ".pdf",
+    };
+    let mut filename = source.file_stem().unwrap_or_default().to_os_string();
+    filename.push(suffix);
+    source.with_file_name(filename)
 }
 
 fn file_row(

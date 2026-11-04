@@ -1,5 +1,6 @@
 mod archive;
 mod latex;
+mod lean;
 mod tixc;
 
 pub use latex::Stats;
@@ -13,7 +14,18 @@ use std::{
     process::Command,
 };
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum MathStyle {
+    #[default]
+    Latex,
+    Lean,
+}
+
 pub fn convert(input: &Path, output: &Path) -> Result<Stats> {
+    convert_with_style(input, output, MathStyle::Latex)
+}
+
+pub fn convert_with_style(input: &Path, output: &Path, style: MathStyle) -> Result<Stats> {
     if input
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("tnsp"))
@@ -48,7 +60,7 @@ pub fn convert(input: &Path, output: &Path) -> Result<Stats> {
         .file_stem()
         .context("input needs a file name")?
         .to_string_lossy();
-    let (tex, stats) = latex::render(&archive, &title, work.path())?;
+    let (tex, stats) = latex::render(&archive, &title, work.path(), style)?;
     fs::write(work.path().join("document.tex"), tex)?;
 
     compile(work.path())?;
