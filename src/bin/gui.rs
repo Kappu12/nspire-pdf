@@ -67,7 +67,6 @@ enum Status {
 struct Converter {
     sources: Vec<PathBuf>,
     output_name: Option<String>,
-    editing_name: Option<String>,
     status: Status,
     style: MathStyle,
     show_widget_placeholders: bool,
@@ -95,19 +94,48 @@ impl Converter {
         }
     }
 
-    fn suggested_destination(&self) -> Option<PathBuf> {
+    fn default_output_path(&self) -> Option<PathBuf> {
         let first = self.sources.first()?;
-        Some(if let Some(name) = &self.output_name {
-            first.with_file_name(name)
-        } else if self.sources.len() > 1 {
+        Some(if self.sources.len() > 1 {
             first.with_file_name("Combined Notes.pdf")
         } else {
             default_destination(first, self.style)
         })
     }
 
-    fn choose_destination(&self) -> Option<PathBuf> {
-        let suggested = self.suggested_destination()?;
+    fn suggested_destination(&self) -> Option<PathBuf> {
+        let default = self.default_output_path()?;
+        let Some(name) = self
+            .output_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            return Some(default);
+        };
+        let filename = Path::new(name);
+        if name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+            || filename.file_name() != Some(filename.as_os_str())
+        {
+            return None;
+        }
+        Some(
+            if filename
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+            {
+                default.with_file_name(filename)
+            } else {
+                default.with_file_name(format!("{name}.pdf"))
+            },
+        )
+    }
+
+    fn choose_destination(&mut self) -> Option<PathBuf> {
+        let Some(suggested) = self.suggested_destination() else {
+            self.status = Status::Failed("Enter a valid PDF filename without a folder.".into());
+            return None;
+        };
         let mut dialog = FileDialog::new().add_filter("PDF document", &["pdf"]);
         if let Some(parent) = suggested.parent().filter(|p| !p.as_os_str().is_empty()) {
             dialog = dialog.set_directory(parent);
@@ -184,26 +212,27 @@ impl Converter {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.dnd_drag_source(ui.id().with(path), index, |ui| {
-                            ui.label(RichText::new("≡").color(MUTED))
-                                .on_hover_text("Drag to reorder");
+                            let (response, painter) =
+                                ui.allocate_painter(egui::vec2(12.0, 18.0), egui::Sense::hover());
+                            let center = response.rect.center();
+                            for offset in [-3.0, 0.0, 3.0] {
+                                painter.hline(
+                                    center.x - 3.0..=center.x + 3.0,
+                                    center.y + offset,
+                                    egui::Stroke::new(1.0, MUTED),
+                                );
+                            }
+                            response.on_hover_text("Drag to reorder");
                         });
                         ui.label(RichText::new(format!("{}.", index + 1)).color(MUTED));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("×").on_hover_text("Remove file").clicked() {
                                 remove = Some(index);
                             }
-                            if ui
-                                .add_enabled(index + 1 < self.sources.len(), egui::Button::new("↓"))
-                                .on_hover_text("Move down")
-                                .clicked()
-                            {
+                            if move_button(ui, index + 1 < self.sources.len(), false) {
                                 reorder = Some((index, index + 1));
                             }
-                            if ui
-                                .add_enabled(index > 0, egui::Button::new("↑"))
-                                .on_hover_text("Move up")
-                                .clicked()
-                            {
+                            if move_button(ui, index > 0, true) {
                                 reorder = Some((index, index - 1));
                             }
                             ui.with_layout(
@@ -234,7 +263,6 @@ impl Converter {
             self.sources.remove(index);
             if self.sources.is_empty() {
                 self.output_name = None;
-                self.editing_name = None;
             }
             self.status = Status::Idle;
         } else if let Some((from, to)) = reorder
@@ -248,64 +276,48 @@ impl Converter {
     }
 
     fn output_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(path) = self.suggested_destination() else {
+        let Some(default) = self.default_output_path() else {
             return;
         };
+        let default_name = default
+            .file_name()
+            .unwrap_or(default.as_os_str())
+            .to_string_lossy();
+        let mut name = self
+            .output_name
+            .clone()
+            .unwrap_or_else(|| default_name.to_string());
+        let editor_id = ui.make_persistent_id("output-name");
         egui::Frame::new()
             .fill(SURFACE)
             .corner_radius(6)
             .inner_margin(8)
             .show(ui, |ui| {
-                ui.label(RichText::new("Output filename").color(MUTED));
-                let edit_id = ui.make_persistent_id("output-name");
-                if let Some(name) = &mut self.editing_name {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(name)
-                            .id(edit_id)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                        self.editing_name = None;
-                    } else if response.lost_focus() {
-                        let name = name.trim();
-                        if name.is_empty() {
-                            self.output_name = None;
-                            self.status = Status::Idle;
-                        } else if Path::new(name).file_name().is_some_and(|file| file == name)
-                            && !name.contains(['/', '\\', ':'])
-                        {
-                            let has_pdf_extension = Path::new(name)
-                                .extension()
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
-                            self.output_name = Some(if has_pdf_extension {
-                                name.to_owned()
-                            } else {
-                                format!("{name}.pdf")
-                            });
-                            self.status = Status::Idle;
-                        } else {
-                            self.status =
-                                Status::Failed("Enter a filename without a folder.".into());
-                        }
-                        self.editing_name = None;
-                    }
-                } else {
-                    let displayed = path.display().to_string();
-                    let response = ui
-                        .add(
-                            egui::Label::new(&displayed)
-                                .sense(egui::Sense::click())
-                                .truncate(),
-                        )
-                        .on_hover_text(format!("{displayed}\nDouble-click to rename"));
-                    if response.double_clicked() {
-                        self.editing_name = path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned());
-                        ui.memory_mut(|memory| memory.request_focus(edit_id));
-                    }
+                let label = ui.label(RichText::new("Output filename").color(MUTED));
+                let width = ui.available_width();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut name)
+                            .id(editor_id)
+                            .hint_text(default_name.as_ref())
+                            .desired_width(width),
+                    )
+                    .labelled_by(label.id)
+                    .changed()
+                {
+                    self.output_name = Some(name);
+                    self.status = Status::Idle;
                 }
             });
+        let path = match &self.status {
+            Status::Done(path, _) => Some(path.clone()),
+            _ => self.suggested_destination(),
+        };
+        if let Some(path) = path {
+            let displayed = path.display().to_string();
+            ui.add(egui::Label::new(RichText::new(&displayed).color(MUTED)).truncate())
+                .on_hover_text(displayed);
+        }
     }
 
     fn status_ui(&mut self, ui: &mut egui::Ui) {
@@ -417,6 +429,27 @@ impl eframe::App for Converter {
 fn is_tns(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("tns"))
+}
+
+fn move_button(ui: &mut egui::Ui, enabled: bool, up: bool) -> bool {
+    let label = if up { "Move up" } else { "Move down" };
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("").min_size(egui::vec2(22.0, 18.0)),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label)
+    });
+    let center = response.rect.center();
+    let tip = if up { -2.0 } else { 2.0 };
+    let stroke = ui.style().interact(&response).fg_stroke;
+    for x in [-3.5, 3.5] {
+        ui.painter().line_segment(
+            [center + egui::vec2(x, -tip), center + egui::vec2(0.0, tip)],
+            stroke,
+        );
+    }
+    response.on_hover_text(label).clicked()
 }
 
 fn convert_button(ui: &mut egui::Ui, ready: bool, stage: Option<ConversionStage>) -> bool {
@@ -559,6 +592,37 @@ mod tests {
         assert_eq!(
             app.suggested_destination(),
             Some(folder.path().join("Revision.pdf"))
+        );
+    }
+
+    #[test]
+    fn filename_editor_accepts_text_and_keeps_the_source_folder() {
+        let mut app = Converter {
+            output_name: Some(String::new()),
+            ..Default::default()
+        };
+        app.add_sources([PathBuf::from("school/notes.tns")]);
+        let ctx = egui::Context::default();
+        for events in [vec![], vec![egui::Event::Text("Revision".to_owned())]] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(475.0, 440.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let editor_id = ui.make_persistent_id("output-name");
+                    ui.memory_mut(|memory| memory.request_focus(editor_id));
+                    app.output_ui(ui);
+                });
+            });
+        }
+        assert_eq!(
+            app.suggested_destination(),
+            Some(PathBuf::from("school").join("Revision.pdf"))
         );
     }
 }
