@@ -18,6 +18,7 @@ const LINE: Color32 = Color32::from_gray(46);
 const SURFACE: Color32 = Color32::from_gray(19);
 const BACKGROUND: Color32 = Color32::from_gray(9);
 const ERROR: Color32 = Color32::from_rgb(255, 161, 152);
+const SOURCE_ROW_HEIGHT: f32 = 30.0;
 
 fn main() -> eframe::Result {
     let mut app = Converter::default();
@@ -63,9 +64,16 @@ enum Status {
     Failed(String),
 }
 
+#[derive(Clone, Copy)]
+struct SourceDrag {
+    from: usize,
+    grab_offset: egui::Vec2,
+}
+
 #[derive(Default)]
 struct Converter {
     sources: Vec<PathBuf>,
+    source_drag: Option<SourceDrag>,
     output_name: Option<String>,
     status: Status,
     style: MathStyle,
@@ -202,28 +210,96 @@ impl Converter {
     }
 
     fn sources_ui(&mut self, ui: &mut egui::Ui) {
+        let count = self.sources.len();
+        let stride = SOURCE_ROW_HEIGHT + ui.spacing().item_spacing.y;
+        let height = SOURCE_ROW_HEIGHT + stride * (count - 1) as f32;
+        let (list, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        let (pointer, origin, released, cancelled) = ui.input(|input| {
+            (
+                input.pointer.interact_pos(),
+                input.pointer.press_origin(),
+                input.pointer.primary_released(),
+                input.key_pressed(egui::Key::Escape)
+                    || !input.focused
+                    || (!input.pointer.primary_down() && !input.pointer.primary_released()),
+            )
+        });
+        if cancelled {
+            self.source_drag = None;
+        }
+        let dragged = self.source_drag.zip(pointer).map(|(drag, pointer)| {
+            let top_left = pointer - drag.grab_offset;
+            let target = ((top_left.y - list.top()) / stride)
+                .round()
+                .clamp(0.0, (count - 1) as f32) as usize;
+            (drag, top_left, target)
+        });
+        if let Some((_, _, target)) = dragged {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            ui.painter().rect_stroke(
+                egui::Rect::from_min_size(
+                    list.min + egui::vec2(0.0, target as f32 * stride),
+                    egui::vec2(list.width(), SOURCE_ROW_HEIGHT),
+                ),
+                6,
+                egui::Stroke::new(1.0, LINE),
+                egui::StrokeKind::Inside,
+            );
+        }
+
         let mut reorder = None;
         let mut remove = None;
         for (index, path) in self.sources.iter().enumerate() {
-            let row = egui::Frame::new()
-                .fill(SURFACE)
+            let id = ui.id().with(("source-row", path));
+            let floating = dragged.filter(|(drag, _, _)| drag.from == index);
+            let top_left = if let Some((_, top_left, _)) = floating {
+                // Seed the animations so the row settles from its release position.
+                ui.ctx()
+                    .animate_value_with_time(id.with("x"), top_left.x - list.left(), 0.0);
+                ui.ctx().animate_value_with_time(
+                    id.with("slot"),
+                    (top_left.y - list.top()) / stride,
+                    0.0,
+                );
+                top_left
+            } else {
+                let slot = match dragged {
+                    Some((drag, _, target)) if drag.from < index && index <= target => index - 1,
+                    Some((drag, _, target)) if target <= index && index < drag.from => index + 1,
+                    _ => index,
+                };
+                let x = ui.ctx().animate_value_with_time(id.with("x"), 0.0, 0.14);
+                let y = ui
+                    .ctx()
+                    .animate_value_with_time(id.with("slot"), slot as f32, 0.14);
+                list.min + egui::vec2(x, y * stride)
+            };
+            let rect =
+                egui::Rect::from_min_size(top_left, egui::vec2(list.width(), SOURCE_ROW_HEIGHT));
+            let mut builder = egui::UiBuilder::new().id_salt(id).max_rect(rect);
+            if floating.is_some() {
+                builder = builder.layer_id(egui::LayerId::new(egui::Order::Tooltip, id));
+            }
+            let mut row_ui = ui.new_child(builder);
+            egui::Frame::new()
+                .fill(if floating.is_some() { LINE } else { SURFACE })
                 .corner_radius(6)
                 .inner_margin(6)
-                .show(ui, |ui| {
+                .show(&mut row_ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.dnd_drag_source(ui.id().with(path), index, |ui| {
-                            let (response, painter) =
-                                ui.allocate_painter(egui::vec2(12.0, 18.0), egui::Sense::hover());
-                            let center = response.rect.center();
-                            for offset in [-3.0, 0.0, 3.0] {
-                                painter.hline(
-                                    center.x - 3.0..=center.x + 3.0,
-                                    center.y + offset,
-                                    egui::Stroke::new(1.0, MUTED),
-                                );
-                            }
-                            response.on_hover_text("Drag to reorder");
-                        });
+                        let (handle, _) =
+                            ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
+                        let center = handle.center();
+                        for offset in [-3.0, 0.0, 3.0] {
+                            ui.painter().hline(
+                                center.x - 3.0..=center.x + 3.0,
+                                center.y + offset,
+                                egui::Stroke::new(1.0, MUTED),
+                            );
+                        }
                         ui.label(RichText::new(format!("{}.", index + 1)).color(MUTED));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("×").on_hover_text("Remove file").clicked() {
@@ -239,25 +315,37 @@ impl Converter {
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     let name = path.file_name().unwrap_or(path.as_os_str());
-                                    ui.add(egui::Label::new(name.to_string_lossy()).truncate())
+                                    let filename = ui
+                                        .add(egui::Label::new(name.to_string_lossy()).truncate())
                                         .on_hover_text(path.display().to_string());
+                                    if dragged.is_none() && count > 1 {
+                                        let response = ui
+                                            .interact(
+                                                handle.union(filename.rect),
+                                                id.with("drag"),
+                                                egui::Sense::drag(),
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::Grab);
+                                        if response.drag_started()
+                                            && let Some(origin) = origin
+                                        {
+                                            self.source_drag = Some(SourceDrag {
+                                                from: index,
+                                                grab_offset: origin - rect.min,
+                                            });
+                                            ui.ctx().request_repaint();
+                                        }
+                                    }
                                 },
                             );
                         });
                     });
-                })
-                .response;
-            if row.dnd_hover_payload::<usize>().is_some() {
-                ui.painter().rect_stroke(
-                    row.rect,
-                    6,
-                    egui::Stroke::new(1.0, FOREGROUND),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            if let Some(from) = row.dnd_release_payload::<usize>() {
-                reorder = Some((*from, index));
-            }
+                });
+        }
+        if released && let Some((drag, _, target)) = dragged {
+            self.source_drag = None;
+            reorder = Some((drag.from, target));
+            ui.ctx().request_repaint();
         }
         if let Some(index) = remove {
             self.sources.remove(index);
@@ -413,7 +501,7 @@ impl eframe::App for Converter {
                         }
                     });
                     ui.add_space(17.0);
-                    let ready = !working && !self.sources.is_empty();
+                    let ready = !working && self.source_drag.is_none() && !self.sources.is_empty();
                     if convert_button(ui, ready, stage)
                         && let Some(destination) = self.choose_destination()
                     {
@@ -552,6 +640,69 @@ fn default_destination(source: &Path, style: MathStyle) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragged_row_follows_pointer_and_other_rows_animate_into_place() {
+        let mut app = Converter::default();
+        app.add_sources(["first.tns", "second.tns", "third.tns"].map(PathBuf::from));
+        let ctx = egui::Context::default();
+        let mut frame = |time, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(475.0, 440.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.sources_ui(ui));
+            })
+        };
+        let filename_position = |frame: &egui::FullOutput, filename| {
+            frame
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == filename => Some(text.pos),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let mouse_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let initial = frame(0.0, vec![]);
+        let first = filename_position(&initial, "first.tns");
+        let second = filename_position(&initial, "second.tns");
+        let third = filename_position(&initial, "third.tns");
+        let grab = first + egui::vec2(4.0, 4.0);
+        let destination = grab + egui::vec2(16.0, third.y - first.y);
+        frame(
+            0.02,
+            vec![egui::Event::PointerMoved(grab), mouse_button(grab, true)],
+        );
+        let moving = frame(0.04, vec![egui::Event::PointerMoved(destination)]);
+        let floating = filename_position(&moving, "first.tns");
+        assert!((floating - (first + (destination - grab))).length() < 1.0);
+
+        let shifting = frame(0.10, vec![]);
+        let second_y = filename_position(&shifting, "second.tns").y;
+        assert!(first.y < second_y && second_y < second.y);
+
+        frame(0.12, vec![mouse_button(destination, false)]);
+        frame(0.14, vec![]);
+        let settled = frame(0.36, vec![]);
+        assert!((filename_position(&settled, "first.tns") - third).length() < 1.0);
+        assert_eq!(
+            app.sources,
+            ["second.tns", "third.tns", "first.tns"].map(PathBuf::from)
+        );
+    }
 
     #[test]
     fn drop_adds_each_tns_file_in_order_without_duplicates() {
