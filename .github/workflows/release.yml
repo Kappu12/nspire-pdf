@@ -94,7 +94,7 @@ jobs:
         run: |
           $release = "target/$env:TARGET/release"
           New-Item -ItemType Directory -Path $env:PACKAGE | Out-Null
-          Copy-Item -LiteralPath "$release/nspire-pdf.exe","$release/nspire-pdf-gui.exe","README.md","LICENSE","LICENSE-TnsTools" -Destination $env:PACKAGE
+          Copy-Item -LiteralPath "$release/nspire-pdf.exe","$release/nspire-pdf-gui.exe","README.md","LICENSE" -Destination $env:PACKAGE
           Compress-Archive -LiteralPath $env:PACKAGE -DestinationPath $env:ASSET
 
       - name: Package Linux binaries
@@ -102,7 +102,7 @@ jobs:
         run: |
           release="target/$TARGET/release"
           mkdir "$PACKAGE"
-          cp "$release/nspire-pdf" "$release/nspire-pdf-gui" README.md LICENSE LICENSE-TnsTools "$PACKAGE/"
+          cp "$release/nspire-pdf" "$release/nspire-pdf-gui" README.md LICENSE "$PACKAGE/"
           tar -czf "$ASSET" "$PACKAGE"
 
       - name: Package macOS app
@@ -112,7 +112,7 @@ jobs:
           app="$PACKAGE/Nspire PDF.app"
           mkdir -p "$app/Contents/MacOS"
           cp "$release/nspire-pdf-gui" "$app/Contents/MacOS/"
-          cp "$release/nspire-pdf" README.md LICENSE LICENSE-TnsTools "$PACKAGE/"
+          cp "$release/nspire-pdf" README.md LICENSE "$PACKAGE/"
           version="${TAG_NAME#v}"
           version="${version%%-*}"
           cat > "$app/Contents/Info.plist" <<EOF

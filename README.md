@@ -73,5 +73,5 @@ terminal PATH, launch the app from the extracted folder with:
 This project is available under the [MIT License](LICENSE).
 
 The method 13 and TIXC implementation follows
-[TnsTools](https://github.com/MaksimirKurtov/TnsTools). See LICENSE-TnsTools
-for its MIT notice.
+[TnsTools](https://github.com/MaksimirKurtov/TnsTools). Its copyright notice
+is included in the project license.
