@@ -1,5 +1,5 @@
 use crate::archive::Archive;
-use crate::{MathStyle, lean};
+use crate::{ExportOptions, MathStyle, lean};
 use anyhow::{Context, Result, bail, ensure};
 use roxmltree::{Document, Node};
 use std::{collections::BTreeMap, fmt::Write, io::Cursor, path::Path};
@@ -23,6 +23,7 @@ const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
 \newcommand{\mathline}[1]{\par{\raggedright\leftskip=1em #1\par}}
 \newcommand{\noteimage}[2]{%
   \par\smallskip{\centering\includegraphics[width=.94\linewidth,height=#1\textheight,keepaspectratio]{#2}\par}\smallskip}
+\newcommand{\omittedwidget}[1]{\par{\small\color{accent} Interactive widget omitted: #1\par}}
 \begin{document}
 \color{ink}
 ";
@@ -32,6 +33,7 @@ pub struct Stats {
     pub notes: usize,
     pub math: usize,
     pub images: usize,
+    pub skipped_widgets: usize,
 }
 
 struct Renderer<'a> {
@@ -55,8 +57,9 @@ pub fn render(
     archive: &Archive<'_>,
     title: &str,
     work: &Path,
-    style: MathStyle,
+    options: ExportOptions,
 ) -> Result<(String, Stats)> {
+    let style = options.style;
     let mut renderer = Renderer {
         archive,
         work,
@@ -86,6 +89,7 @@ pub fn render(
         })
         .collect();
     problems.sort_unstable_by_key(|(number, _, _)| *number);
+    let mut wrote_problem = false;
     for (number, file, entry) in problems {
         let decoded = entry.decode().with_context(|| format!("decoding {file}"))?;
         let xml = Document::parse(str::from_utf8(&decoded)?)
@@ -96,18 +100,33 @@ pub fn render(
         } else {
             format!("Problem {number} / {}", escape(title))
         };
-        let notes_before = renderer.stats.notes;
+        let mut heading_written = false;
         for widget in xml.descendants().filter(|n| n.has_tag_name("wdgt")) {
             let widget_type = widget.attribute("type").unwrap_or("unknown");
-            if widget_type != "TI.Notepad" {
+            let supported = widget_type == "TI.Notepad";
+            if !supported {
+                renderer.stats.skipped_widgets += 1;
                 eprintln!("warning: {file}: skipping widget type {widget_type}");
-                continue;
+                if !options.show_widget_placeholders {
+                    continue;
+                }
             }
-            if renderer.stats.notes == notes_before {
-                if notes_before > 0 {
+            if !heading_written {
+                if wrote_problem {
                     tex.push_str("\\clearpage\n");
                 }
                 writeln!(tex, r"\problem{{{heading}}}")?;
+                heading_written = true;
+                wrote_problem = true;
+            }
+            if !supported {
+                let label = if widget_type == "TI.ScriptApp" {
+                    "TI-Nspire Lua app"
+                } else {
+                    widget_type
+                };
+                writeln!(tex, r"\omittedwidget{{{}}}", escape(label))?;
+                continue;
             }
             let source = children(widget)
                 .find(|node| node.has_tag_name("fmtxt"))
@@ -182,6 +201,21 @@ impl Renderer<'_> {
                             line.push_str(&body);
                         }
                     }
+                    "1vector" => {
+                        let text = node.text().unwrap_or("");
+                        let symbol = text.trim();
+                        if !symbol.is_empty() {
+                            line.push_str(&escape(&text[..text.len() - text.trim_start().len()]));
+                            let expression = if self.style == MathStyle::Lean {
+                                format!("vec {}", lean::operand(&lean::text(symbol, false)))
+                            } else {
+                                format!(r"\overrightarrow{{{}}}", math_text(symbol, false)?)
+                            };
+                            self.write_math(&mut line, expression)?;
+                            line.push_str(&escape(&text[text.trim_end().len()..]));
+                            math_count += 1;
+                        }
+                    }
                     "1widgetNode" => {
                         flush_line(tex, &mut line, has_words, math_count)?;
                         has_words = false;
@@ -196,12 +230,7 @@ impl Renderer<'_> {
                             } else if !line.is_empty() && !line.ends_with(char::is_whitespace) {
                                 line.push_str(r"\allowbreak\ ");
                             }
-                            if self.style == MathStyle::Lean {
-                                self.expressions.push(part.trim().to_owned());
-                                line.push(lean::SLOT);
-                            } else {
-                                write!(line, r"\(\displaystyle {part}\)")?;
-                            }
+                            self.write_math(&mut line, part)?;
                         }
                         math_count += 1;
                         self.stats.math += 1;
@@ -210,6 +239,16 @@ impl Renderer<'_> {
                 }
             }
             flush_line(tex, &mut line, has_words, math_count)?;
+        }
+        Ok(())
+    }
+
+    fn write_math(&mut self, line: &mut String, expression: String) -> Result<()> {
+        if self.style == MathStyle::Lean {
+            self.expressions.push(expression.trim().to_owned());
+            line.push(lean::SLOT);
+        } else {
+            write!(line, r"\(\displaystyle {expression}\)")?;
         }
         Ok(())
     }
@@ -396,7 +435,88 @@ fn math_element(node: Node<'_, '_>, inside_subscript: bool, style: MathStyle) ->
                 format!("{operator}{{{value}}}")
             }
         }
-        other => bail!("unsupported math element {other}"),
+        "0mline" => {
+            let text: String = node
+                .descendants()
+                .filter(|n| n.has_tag_name("leaf"))
+                .filter_map(|n| n.text())
+                .collect();
+            if style == MathStyle::Lean {
+                text.replace(char::is_whitespace, " ")
+            } else {
+                format!(
+                    r"\text{{\parbox[t]{{.78\linewidth}}{{\raggedright {}}}}}",
+                    escape(&text)
+                )
+            }
+        }
+        other => math_template(node, other, &args(false)?, style)?,
+    })
+}
+
+fn math_template(
+    node: Node<'_, '_>,
+    kind: &str,
+    args: &[String],
+    style: MathStyle,
+) -> Result<String> {
+    use MathStyle::{Latex, Lean};
+    Ok(match (kind, args, style) {
+        ("0sqrt", [x], Latex) => format!(r"\sqrt{{{x}}}"),
+        ("0sqrt", [x], Lean) => format!("sqrt ({x})"),
+        ("0nroot", [x, index], Latex) => format!(r"\sqrt[{index}]{{{x}}}"),
+        ("0nroot", [x, index], Lean) => format!("root ({x}) ({index})"),
+        ("0abs", [x], Latex) => format!(r"\left|{x}\right|"),
+        ("0abs", [x], Lean) => format!("abs ({x})"),
+        ("0logn", [x, base], Latex) => format!(r"\log_{{{base}}}\left({x}\right)"),
+        ("0logn", [x, base], Lean) => format!("logBase ({base}) ({x})"),
+        ("0list", [x], Latex) => format!(r"\left\{{{x}\right\}}"),
+        ("0list", [x], Lean) => format!("[{x}]"),
+        ("0deriv", [x, var], Latex) => {
+            format!(r"\frac{{\mathrm{{d}}}}{{\mathrm{{d}}{var}}}\left({x}\right)")
+        }
+        ("0deriv", [x, var], Lean) => format!("derivative ({var}) ({x})"),
+        ("0integral", [x, var, lower, upper], Latex) => {
+            format!(r"\int_{{{lower}}}^{{{upper}}} {x}\,\mathrm{{d}}{var}")
+        }
+        ("0integral", [x, var, lower, upper], Lean) => {
+            format!("integral ({lower}) ({upper}) (fun {var} => {x})")
+        }
+        ("0sum", [x, var, lower, upper], Latex) => {
+            format!(r"\sum_{{{var}={lower}}}^{{{upper}}} {x}")
+        }
+        ("0sum", [x, var, lower, upper], Lean) => {
+            format!("sum ({lower}) ({upper}) (fun {var} => {x})")
+        }
+        ("0system", rows, Latex) if !rows.is_empty() => format!(
+            r"\left\{{\begin{{gathered}}{}\end{{gathered}}\right.",
+            rows.join(r"\\ ")
+        ),
+        ("0system", rows, Lean) if !rows.is_empty() => format!("system [{}]", rows.join(", ")),
+        ("0matrix", cells, style) => {
+            let columns: usize = node
+                .attribute("data")
+                .context("missing matrix column count")?
+                .parse()?;
+            ensure!(
+                columns > 0 && !cells.is_empty() && cells.len().is_multiple_of(columns),
+                "invalid matrix dimensions"
+            );
+            if style == Latex {
+                let rows: Vec<_> = cells.chunks(columns).map(|row| row.join(" & ")).collect();
+                format!(r"\begin{{bmatrix}}{}\end{{bmatrix}}", rows.join(r"\\ "))
+            } else {
+                let rows: Vec<_> = cells
+                    .chunks(columns)
+                    .map(|row| format!("[{}]", row.join(", ")))
+                    .collect();
+                format!("[{}]", rows.join(", "))
+            }
+        }
+        _ => bail!(
+            "unsupported math element {kind} with {} operands",
+            args.len()
+        ),
     })
 }
 
@@ -424,6 +544,19 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
+        if let Some(subscript) = decode_subscript(ch) {
+            if !inside_subscript {
+                out.push_str("_{");
+            }
+            out.push(subscript);
+            while let Some(next) = chars.next_if(|c| decode_subscript(*c).is_some()) {
+                out.extend(decode_subscript(next));
+            }
+            if !inside_subscript {
+                out.push('}');
+            }
+            continue;
+        }
         match ch {
             '*' if chars.peek() == Some(&'_') && {
                 let token: String = chars
@@ -453,7 +586,9 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
                     write!(out, r"\times 10^{{{sign}{exponent}}}")?;
                 }
             }
-            '\u{f86d}' => out.push_str(r"_{\mathrm{m}}"),
+            '\u{f005}' => out.push_str("^{-1}"),
+            '\u{f041}' => out.push('c'),
+            '\u{f042}' => out.push('n'),
             'λ' => out.push_str(r"\lambda "),
             'μ' => out.push_str(r"\mu "),
             'ρ' => out.push_str(r"\rho "),
@@ -465,19 +600,24 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
             '≠' => out.push_str(r"\ne "),
             '≈' => out.push_str(r"\approx "),
             '⇔' => out.push_str(r"\Leftrightarrow "),
+            'µ' => out.push_str(r"\mu "),
+            '∆' => out.push_str(r"\Delta "),
             '°' => out.push_str(r"^{\circ}"),
-            '₀'..='₉' => {
-                let digit = u32::from(ch) - u32::from('₀');
-                if inside_subscript {
-                    write!(out, "{digit}")?;
-                } else {
-                    let rest: String =
-                        std::iter::from_fn(|| chars.next_if(|c| ('₀'..='₉').contains(c)))
-                            .map(|c| (b'0' + (u32::from(c) - u32::from('₀')) as u8) as char)
-                            .collect();
-                    write!(out, "_{{{digit}{rest}}}")?;
-                }
-            }
+            'Α'..='Ω'
+            | 'α'..='ω'
+            | '±'
+            | '∈'
+            | '∉'
+            | 'ℤ'
+            | 'ℝ'
+            | '∑'
+            | '→'
+            | '⇒'
+            | '∥'
+            | '⊥'
+            | '²'
+            | '⁺'
+            | '⁻' => out.push(ch),
             '_' if chars.peek().is_some_and(char::is_ascii_alphabetic) => {
                 let token: String =
                     std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
@@ -526,6 +666,20 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
     Ok(out)
 }
 
+pub(crate) fn decode_subscript(ch: char) -> Option<char> {
+    match ch {
+        '₀'..='₉' => char::from_u32(ch as u32 - '₀' as u32 + '0' as u32),
+        '\u{f841}'..='\u{f85a}' => char::from_u32(ch as u32 - 0xf841 + 'A' as u32),
+        '\u{f861}'..='\u{f87a}' => char::from_u32(ch as u32 - 0xf861 + 'a' as u32),
+        '\u{f8b1}' => Some('α'),
+        '\u{f8b2}' => Some('β'),
+        '\u{f8bc}' => Some('μ'),
+        '₊' => Some('+'),
+        '₋' => Some('-'),
+        _ => None,
+    }
+}
+
 pub(crate) fn display_unit(token: &str) -> Option<&str> {
     match token {
         "gm" => Some("g"),
@@ -565,6 +719,34 @@ mod tests {
         assert_eq!(
             math_element(xml.root_element(), false, MathStyle::Lean).unwrap(),
             "_0"
+        );
+    }
+
+    #[test]
+    fn matrix_column_count_controls_row_breaks() {
+        let xml = Document::parse(r#"<node name="0matrix" data="2"/>"#).unwrap();
+        let cells = ["a", "b", "c", "d"].map(str::to_owned);
+        assert_eq!(
+            math_template(xml.root_element(), "0matrix", &cells, MathStyle::Latex).unwrap(),
+            r"\begin{bmatrix}a & b\\ c & d\end{bmatrix}"
+        );
+        assert_eq!(
+            math_template(xml.root_element(), "0matrix", &cells, MathStyle::Lean).unwrap(),
+            "[[a, b], [c, d]]"
+        );
+    }
+
+    #[test]
+    fn calculus_templates_keep_ti_operand_order() {
+        let xml = Document::parse("<node/>").unwrap();
+        let operands = ["f(x)", "x", "0", "1"].map(str::to_owned);
+        assert_eq!(
+            math_template(xml.root_element(), "0integral", &operands, MathStyle::Latex).unwrap(),
+            r"\int_{0}^{1} f(x)\,\mathrm{d}x"
+        );
+        assert_eq!(
+            math_template(xml.root_element(), "0sum", &operands, MathStyle::Latex).unwrap(),
+            r"\sum_{x=0}^{1} f(x)"
         );
     }
 }

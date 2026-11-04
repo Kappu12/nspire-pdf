@@ -21,6 +21,12 @@ pub enum MathStyle {
     Lean,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ExportOptions {
+    pub style: MathStyle,
+    pub show_widget_placeholders: bool,
+}
+
 #[derive(Clone, Copy)]
 pub enum ConversionStage {
     Reading,
@@ -40,6 +46,23 @@ pub fn convert_with_progress(
     input: &Path,
     output: &Path,
     style: MathStyle,
+    report: impl FnMut(ConversionStage),
+) -> Result<Stats> {
+    convert_with_options(
+        input,
+        output,
+        ExportOptions {
+            style,
+            ..ExportOptions::default()
+        },
+        report,
+    )
+}
+
+pub fn convert_with_options(
+    input: &Path,
+    output: &Path,
+    options: ExportOptions,
     mut report: impl FnMut(ConversionStage),
 ) -> Result<Stats> {
     if input
@@ -77,7 +100,7 @@ pub fn convert_with_progress(
         .file_stem()
         .context("input needs a file name")?
         .to_string_lossy();
-    let (tex, stats) = latex::render(&archive, &title, work.path(), style)?;
+    let (tex, stats) = latex::render(&archive, &title, work.path(), options)?;
     fs::write(work.path().join("document.tex"), tex)?;
 
     report(ConversionStage::Typesetting);

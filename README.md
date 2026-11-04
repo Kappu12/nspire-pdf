@@ -60,13 +60,14 @@ Install Lean 4 on PATH or set LEAN to the absolute path of the Lean executable.
 ## Supported content
 
 - TI-Nspire .tns containers with stored, deflated, or TI method 13 entries.
-- Notes prose, fractions, powers, subscripts, common math symbols, and
-  calculator results saved inside Notes math boxes.
+- Notes prose and math, including fractions, roots, powers, subscripts,
+  vectors, matrices, equation systems, and saved calculator results.
 - Embedded BMP, PNG, and JPEG images. The converter reflows Notes for print
   and keeps embedded screenshots as images.
-- Other TI-Nspire app widgets are skipped with a warning. Unsupported Notes
-  structures produce an error. The converter uses the saved results and
-  does not evaluate the original calculations.
+- Interactive TI-Nspire widgets, including Lua apps, are skipped by default.
+  The desktop checkbox can mark their locations in the PDF. Unsupported
+  Notes structures produce an error. The converter uses the saved results
+  and does not evaluate the original calculations.
 - PublishView .tnsp is a separate format. Use
   [TI-Nspire's conversion workflow](https://education.ti.com/en/customer-support/knowledge-base/ti-nspire-family/product-usage/32332)
   to save it as .tns first. PublishView-specific objects may be dropped by

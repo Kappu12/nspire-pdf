@@ -86,6 +86,14 @@ pub fn text(input: &str, in_subscript: bool) -> String {
     let mut chars = input.chars().peekable();
     let mut previous = None;
     while let Some(ch) = chars.next() {
+        if let Some(subscript) = crate::latex::decode_subscript(ch) {
+            if !in_subscript && previous.and_then(crate::latex::decode_subscript).is_none() {
+                result.push('_');
+            }
+            result.push(subscript);
+            previous = Some(ch);
+            continue;
+        }
         match ch {
             '−' | '-' => result.push_str(
                 if previous.is_none_or(|p: char| !p.is_alphanumeric() && p != ')') {
@@ -100,7 +108,9 @@ pub fn text(input: &str, in_subscript: bool) -> String {
             '·' | '×' => result.push_str(" * "),
             '▶' => result.push_str(" ▷ "),
             '\u{f03f}' => result.push('e'),
-            '\u{f86d}' => result.push_str("_m"),
+            '\u{f005}' => result.push_str(" ^ (-1)"),
+            '\u{f041}' => result.push('c'),
+            '\u{f042}' => result.push('n'),
             '\u{f000}' => {
                 let sign = chars.next_if(|c| matches!(c, '+' | '-' | '−'));
                 let exponent: String =
@@ -112,12 +122,6 @@ pub fn text(input: &str, in_subscript: bool) -> String {
                     let sign = sign.map_or("", |c| if c == '+' { "+" } else { "-" });
                     result.push_str(&format!("e{sign}{exponent}"));
                 }
-            }
-            '₀'..='₉' => {
-                if !in_subscript && !previous.is_some_and(|c| ('₀'..='₉').contains(&c)) {
-                    result.push('_');
-                }
-                result.push(char::from(b'0' + (ch as u32 - '₀' as u32) as u8));
             }
             '_' if chars.peek().is_some_and(char::is_ascii_alphabetic) => {
                 let name: String =

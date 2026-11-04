@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText};
-use nspire_pdf::{ConversionStage, MathStyle, Stats};
+use nspire_pdf::{ConversionStage, ExportOptions, MathStyle, Stats};
 use rfd::FileDialog;
 use std::{
     env,
@@ -68,6 +68,7 @@ struct Converter {
     destination: Option<PathBuf>,
     status: Status,
     style: MathStyle,
+    show_widget_placeholders: bool,
 }
 
 impl Converter {
@@ -120,13 +121,16 @@ impl Converter {
             return;
         };
         let ctx = ctx.clone();
-        let style = self.style;
+        let options = ExportOptions {
+            style: self.style,
+            show_widget_placeholders: self.show_widget_placeholders,
+        };
         let (send, receive) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("pdf-converter".into())
             .spawn(move || {
                 let result =
-                    nspire_pdf::convert_with_progress(&source, &destination, style, |stage| {
+                    nspire_pdf::convert_with_options(&source, &destination, options, |stage| {
                         let _ = send.send(WorkerUpdate::Progress(stage));
                         ctx.request_repaint();
                     })
@@ -237,6 +241,10 @@ impl eframe::App for Converter {
                             self.destination = Some(default_destination(source, self.style));
                             self.status = Status::Idle;
                         }
+                        ui.checkbox(
+                            &mut self.show_widget_placeholders,
+                            "Mark skipped app panes in PDF",
+                        );
                         ui.add_space(9.0);
                         if source_target(ui, self.source.as_deref(), file_hover)
                             && let Some(path) = FileDialog::new()
