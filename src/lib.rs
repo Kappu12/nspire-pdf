@@ -154,17 +154,10 @@ fn read_input(input: &Path) -> Result<Vec<u8>> {
 }
 
 fn compile(work: &Path) -> Result<()> {
-    let compiler = env::var_os("TECTONIC")
-        .or_else(|| {
-            let exe = env::current_exe().ok()?;
-            let sibling = exe.with_file_name(if cfg!(windows) {
-                "tectonic.exe"
-            } else {
-                "tectonic"
-            });
-            sibling.is_file().then(|| sibling.into_os_string())
-        })
-        .unwrap_or_else(|| "tectonic".into());
+    let compiler = match env::var_os("TECTONIC") {
+        Some(program) => program,
+        None => default_compiler(work)?,
+    };
     let mut command = Command::new(compiler);
     command
         .current_dir(work)
@@ -194,4 +187,30 @@ fn compile(work: &Path) -> Result<()> {
         bail!("LaTeX compilation failed ({}). {}", result.status, detail);
     }
     Ok(())
+}
+
+#[cfg(embedded_tectonic)]
+fn default_compiler(work: &Path) -> Result<std::ffi::OsString> {
+    let executable = work.join("tectonic.exe");
+    fs::write(
+        &executable,
+        include_bytes!(env!("NSPIRE_PDF_TECTONIC_PATH")),
+    )
+    .context("extracting the built-in Tectonic compiler")?;
+    Ok(executable.into_os_string())
+}
+
+#[cfg(not(embedded_tectonic))]
+fn default_compiler(_work: &Path) -> Result<std::ffi::OsString> {
+    Ok(env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            let sibling = exe.with_file_name(if cfg!(windows) {
+                "tectonic.exe"
+            } else {
+                "tectonic"
+            });
+            sibling.is_file().then(|| sibling.into_os_string())
+        })
+        .unwrap_or_else(|| "tectonic".into()))
 }

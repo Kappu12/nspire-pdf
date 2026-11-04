@@ -7,24 +7,33 @@ small embedded screenshots for print.
 
 ## Install
 
-Install Rust 1.95 or newer and [Tectonic](https://tectonic-typesetting.github.io/).
+The Cargo install commands compile the app and CLI on your machine. For those
+builds, install Rust 1.95 or newer and [Tectonic](https://tectonic-typesetting.github.io/).
 Put Tectonic on PATH or set the TECTONIC environment variable to its absolute
-path. The install commands compile the app and CLI on your machine.
+path.
 
 ### Windows (PowerShell)
 
-With the MSVC Rust toolchain, install Visual Studio Build Tools with the
-Desktop development with C++ workload.
+Download the prebuilt Windows x64 app from the
+[v0.1.4 release](https://github.com/Kappu12/nspire-pdf/releases/tag/v0.1.4).
+The EXE includes Tectonic. On first use, Tectonic may download its TeX resources.
 
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.3 --features gui
+To build from source with the MSVC Rust toolchain, install Visual Studio Build
+Tools with the Desktop development with C++ workload.
+
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.4 --features gui
     nspire-pdf-gui.exe
+
+To build an EXE with Tectonic included, set NSPIRE_PDF_EMBED_TECTONIC to the
+absolute path to a Tectonic executable for the target Windows architecture,
+then run cargo build --locked --release --features gui.
 
 ### macOS
 
 Install the Xcode Command Line Tools if needed.
 
     xcode-select --install
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.3 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.4 --features gui
     nspire-pdf-gui
 
 ### Linux (Debian or Ubuntu)
@@ -32,7 +41,7 @@ Install the Xcode Command Line Tools if needed.
 Install the desktop build dependencies:
 
     sudo apt-get install build-essential pkg-config libgl1-mesa-dev libwayland-dev libxkbcommon-dev
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.3 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.4 --features gui
     nspire-pdf-gui
 
 In the app, choose or drop one or more .tns files. Drag the rows or use the
