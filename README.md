@@ -70,6 +70,8 @@ terminal PATH, launch the app from the extracted folder with:
   to save it as .tns first. PublishView-specific objects may be dropped by
   that conversion.
 
+This project is available under the [MIT License](LICENSE).
+
 The method 13 and TIXC implementation follows
 [TnsTools](https://github.com/MaksimirKurtov/TnsTools). See LICENSE-TnsTools
 for its MIT notice.
