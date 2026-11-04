@@ -16,7 +16,7 @@ path. The install commands compile the app and CLI on your machine.
 With the MSVC Rust toolchain, install Visual Studio Build Tools with the
 Desktop development with C++ workload.
 
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.2 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.3 --features gui
     nspire-pdf-gui.exe
 
 ### macOS
@@ -24,7 +24,7 @@ Desktop development with C++ workload.
 Install the Xcode Command Line Tools if needed.
 
     xcode-select --install
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.2 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.3 --features gui
     nspire-pdf-gui
 
 ### Linux (Debian or Ubuntu)
@@ -32,10 +32,12 @@ Install the Xcode Command Line Tools if needed.
 Install the desktop build dependencies:
 
     sudo apt-get install build-essential pkg-config libgl1-mesa-dev libwayland-dev libxkbcommon-dev
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.2 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.3 --features gui
     nspire-pdf-gui
 
-In the app, choose or drop a .tns file, then select Convert to PDF.
+In the app, choose or drop one or more .tns files. Drag the rows or use the
+arrows to set the PDF order. Edit the output filename, then select Convert to
+PDF to choose where to save it.
 
 ## Command line
 
