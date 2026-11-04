@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+
+      - name: Run Rust tests
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 test --locked --all-features

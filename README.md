@@ -5,18 +5,37 @@ archive, decodes TI method 13 entries, and translates Notes into LaTeX. Tectonic
 compiles the LaTeX with selectable text and vector math. The converter sharpens
 small embedded screenshots for print.
 
-## Desktop app
+## Install
 
-Build the desktop app with:
+Install Rust 1.95 or newer and [Tectonic](https://tectonic-typesetting.github.io/).
+Put Tectonic on PATH or set the TECTONIC environment variable to its absolute
+path. The install commands compile the app and CLI on your machine.
 
-    cargo build --release --features gui
+### Windows (PowerShell)
 
-Launch nspire-pdf-gui from target/release. Pick LaTeX or Lean for the math,
-choose or drop a .tns file, and select Convert to PDF. Open PDF opens the
-result in your default viewer.
+With the MSVC Rust toolchain, install Visual Studio Build Tools with the
+Desktop development with C++ workload.
 
-The app looks for Tectonic next to its executable or on PATH. The TECTONIC
-environment variable takes precedence.
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.2 --features gui
+    nspire-pdf-gui.exe
+
+### macOS
+
+Install the Xcode Command Line Tools if needed.
+
+    xcode-select --install
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.2 --features gui
+    nspire-pdf-gui
+
+### Linux (Debian or Ubuntu)
+
+Install the desktop build dependencies:
+
+    sudo apt-get install build-essential pkg-config libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.2 --features gui
+    nspire-pdf-gui
+
+In the app, choose or drop a .tns file, then select Convert to PDF.
 
 ## Command line
 
@@ -37,23 +56,6 @@ Lean 4 to format linear expressions and calculator fragments as code-style
 math. Both modes use Tectonic for page layout, and both preserve the saved
 calculator results. Lean mode formats syntax without evaluating or proving it.
 Install Lean 4 on PATH or set LEAN to the absolute path of the Lean executable.
-
-## Release builds
-
-Push a new version tag to publish the desktop and CLI packages:
-
-    git tag -a v0.1.0 -m "Release v0.1.0"
-    git push origin v0.1.0
-
-The workflow publishes Windows x64, Linux x64, and macOS packages for Apple
-Silicon and Intel. Tags such as v0.1.0-rc.1 publish as prereleases. Packages
-go directly to GitHub Releases.
-
-Install Tectonic separately before converting a file. On macOS, the app bundle
-is ad-hoc signed and lacks notarization. If Tectonic is available only in your
-terminal PATH, launch the app from the extracted folder with:
-
-    TECTONIC="$(command -v tectonic)" "./Nspire PDF.app/Contents/MacOS/nspire-pdf-gui"
 
 ## Supported content
 
