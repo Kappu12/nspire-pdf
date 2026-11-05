@@ -15,13 +15,13 @@ path.
 ### Windows (PowerShell)
 
 Download the prebuilt Windows x64 app from the
-[v0.1.5 release](https://github.com/Kappu12/nspire-pdf/releases/tag/v0.1.5).
+[v0.1.6 release](https://github.com/Kappu12/nspire-pdf/releases/tag/v0.1.6).
 The EXE includes Tectonic. On first use, Tectonic may download its TeX resources.
 
 To build from source with the MSVC Rust toolchain, install Visual Studio Build
 Tools with the Desktop development with C++ workload.
 
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.5 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.6 --features gui
     nspire-pdf-gui.exe
 
 To build an EXE with Tectonic included, set NSPIRE_PDF_EMBED_TECTONIC to the
@@ -33,7 +33,7 @@ then run cargo build --locked --release --features gui.
 Install the Xcode Command Line Tools if needed.
 
     xcode-select --install
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.5 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.6 --features gui
     nspire-pdf-gui
 
 ### Linux (Debian or Ubuntu)
@@ -41,7 +41,7 @@ Install the Xcode Command Line Tools if needed.
 Install the desktop build dependencies:
 
     sudo apt-get install build-essential pkg-config libgl1-mesa-dev libwayland-dev libxkbcommon-dev
-    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.5 --features gui
+    cargo install --locked --git https://github.com/Kappu12/nspire-pdf --tag v0.1.6 --features gui
     nspire-pdf-gui
 
 In the app, choose or drop one or more .tns files. Drag the rows or use the
