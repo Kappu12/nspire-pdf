@@ -10,7 +10,6 @@ const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
 \setmathfont{latinmodern-math.otf}
 \newfontface\nspiresymbolfont{DejaVuSans.ttf}
 \newcommand{\nspiresymbol}[1]{{\nspiresymbolfont #1}}
-\definecolor{ink}{HTML}{101720}
 \definecolor{accent}{HTML}{245166}
 \definecolor{rulecolor}{HTML}{BDC9CF}
 \setlength{\parindent}{0pt}
@@ -35,7 +34,7 @@ const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
   \par\smallskip{\centering\includegraphics[width=#1\linewidth,height=#2\textheight,keepaspectratio]{#3}\par}\smallskip}
 \newcommand{\omittedwidget}[1]{\par{\small\color{accent} Interactive widget omitted: #1\par}}
 \begin{document}
-\color{ink}
+\color{black}
 ";
 
 #[derive(Default)]
@@ -61,6 +60,78 @@ fn name<'a>(node: Node<'a, '_>) -> &'a str {
 
 fn children<'a, 'input>(node: Node<'a, 'input>) -> impl Iterator<Item = Node<'a, 'input>> {
     node.children().filter(Node::is_element)
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum NoteColor {
+    #[default]
+    Black,
+    White,
+}
+
+#[derive(Default)]
+struct NoteFormat {
+    flags: u8,
+    color: Option<NoteColor>,
+}
+
+type NoteFormats<'a> = BTreeMap<&'a str, NoteFormat>;
+
+fn note_formats<'a>(root: Node<'a, '_>) -> NoteFormats<'a> {
+    root.descendants()
+        .filter(|node| node.has_tag_name("formatEntry"))
+        .filter_map(|node| {
+            Some((
+                node.attribute("entryID")?,
+                NoteFormat {
+                    flags: node
+                        .attribute("fst")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
+                    color: node
+                        .attribute("tc")
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .map(|tc| {
+                            // TI's palette stores white as 0xfffffe and black as 1.
+                            if matches!(tc, 0xfffffe | 0xffffff) {
+                                NoteColor::White
+                            } else {
+                                NoteColor::Black
+                            }
+                        }),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn note_color(node: Node<'_, '_>, formats: &NoteFormats<'_>) -> NoteColor {
+    node.ancestors()
+        .find_map(|node| formats.get(node.attribute("id0")?)?.color)
+        .unwrap_or_default()
+}
+
+fn colored(body: String, color: NoteColor, parent: NoteColor, style: MathStyle) -> String {
+    if body.trim().is_empty() || color == parent {
+        return body;
+    }
+    if style == MathStyle::Lean {
+        let start = if color == NoteColor::White {
+            lean::WHITE
+        } else {
+            lean::BLACK
+        };
+        format!("{start}{body}{}", lean::END_COLOR)
+    } else {
+        let color = if color == NoteColor::White {
+            "white"
+        } else {
+            "black"
+        };
+        // TeX groups preserve operator spacing and allow scripts to attach to
+        // the preceding atom, unlike wrapping each colored run in math braces.
+        format!(r"\begingroup\color{{{color}}}{body}\endgroup ")
+    }
 }
 
 fn app_panes<'a, 'input>(problem: Node<'a, 'input>) -> impl Iterator<Item = Node<'a, 'input>> {
@@ -204,16 +275,7 @@ impl<'a> Renderer<'a> {
         let document = children(root)
             .find(|node| name(*node) == "1doc")
             .context("unsupported Notes document structure")?;
-        let formats: BTreeMap<_, _> = root
-            .descendants()
-            .filter(|n| n.has_tag_name("formatEntry"))
-            .filter_map(|n| {
-                Some((
-                    n.attribute("entryID")?,
-                    n.attribute("fst")?.parse::<u8>().ok()?,
-                ))
-            })
-            .collect();
+        let formats = note_formats(root);
         let fallback_image_height = if document
             .descendants()
             .filter(|n| name(*n) == "1widgetNode")
@@ -239,10 +301,15 @@ impl<'a> Renderer<'a> {
                 match name(node) {
                     "1word" => {
                         let word = node.text().unwrap_or("");
-                        let body = escape_note_word(word);
+                        let body = colored(
+                            escape_note_word(word),
+                            note_color(node, &formats),
+                            NoteColor::Black,
+                            MathStyle::Latex,
+                        );
                         let style = formats
                             .get(node.attribute("id0").unwrap_or(""))
-                            .copied()
+                            .map(|format| format.flags)
                             .unwrap_or(0);
                         has_words |= !word.trim().is_empty();
                         if !body.trim().is_empty() && style & 1 != 0 {
@@ -263,7 +330,15 @@ impl<'a> Renderer<'a> {
                             } else {
                                 format!(r"\overrightarrow{{{}}}", math_text(symbol, false)?)
                             };
-                            self.write_math(&mut line, expression)?;
+                            self.write_math(
+                                &mut line,
+                                colored(
+                                    expression,
+                                    note_color(node, &formats),
+                                    NoteColor::Black,
+                                    self.options.style,
+                                ),
+                            )?;
                             line.push_str(&escape(&text[text.trim_end().len()..]));
                             math_count += 1;
                         }
@@ -275,7 +350,7 @@ impl<'a> Renderer<'a> {
                         self.image(archive, node, fallback_image_height, tex)?;
                     }
                     "0el" => {
-                        let parts = math_box(node, self.options.style)?;
+                        let parts = math_box(node, self.options.style, &formats)?;
                         for (i, part) in parts.into_iter().enumerate() {
                             if i > 0 {
                                 line.push_str(r"\allowbreak\quad\(\mapsto\)\nobreak\;");
@@ -459,22 +534,54 @@ fn flush_line(
     Ok(())
 }
 
-fn math_box(node: Node<'_, '_>, style: MathStyle) -> Result<Vec<String>> {
+fn math_box(
+    node: Node<'_, '_>,
+    style: MathStyle,
+    formats: &NoteFormats<'_>,
+) -> Result<Vec<String>> {
+    let color = note_color(node, formats);
     let parts: Vec<_> = children(node)
         .filter(|n| !n.has_tag_name("mbox"))
-        .map(|node| math_element(node, false, style))
+        .map(|node| {
+            Ok(colored(
+                math_element_formatted(node, false, style, formats, color)?,
+                color,
+                NoteColor::Black,
+                style,
+            ))
+        })
         .collect::<Result<_>>()?;
     Ok(parts.into_iter().filter(|s| !s.trim().is_empty()).collect())
 }
 
 fn math_element(node: Node<'_, '_>, inside_subscript: bool, style: MathStyle) -> Result<String> {
+    math_element_formatted(
+        node,
+        inside_subscript,
+        style,
+        &NoteFormats::new(),
+        NoteColor::Black,
+    )
+}
+
+fn math_element_formatted(
+    node: Node<'_, '_>,
+    inside_subscript: bool,
+    style: MathStyle,
+    formats: &NoteFormats<'_>,
+    parent: NoteColor,
+) -> Result<String> {
+    let color = formats
+        .get(node.attribute("id0").unwrap_or(""))
+        .and_then(|f| f.color)
+        .unwrap_or(parent);
     let args = |inside_subscript| {
         children(node)
-            .map(|child| math_element(child, inside_subscript, style))
+            .map(|child| math_element_formatted(child, inside_subscript, style, formats, color))
             .collect::<Result<Vec<_>>>()
     };
     let kind = name(node);
-    Ok(match kind {
+    let body = match kind {
         "0el" => args(inside_subscript)?.join(""),
         "0text" | "0paren" => {
             let text = node.text().unwrap_or("");
@@ -517,19 +624,25 @@ fn math_element(node: Node<'_, '_>, inside_subscript: bool, style: MathStyle) ->
             let text: String = node
                 .descendants()
                 .filter(|n| n.has_tag_name("leaf"))
-                .filter_map(|n| n.text())
+                .map(|leaf| {
+                    let text = leaf.text().unwrap_or("");
+                    let text = if style == MathStyle::Lean {
+                        text.replace(char::is_whitespace, " ")
+                    } else {
+                        escape(text)
+                    };
+                    colored(text, note_color(leaf, formats), color, style)
+                })
                 .collect();
             if style == MathStyle::Lean {
-                text.replace(char::is_whitespace, " ")
+                text
             } else {
-                format!(
-                    r"\text{{\parbox[t]{{.78\linewidth}}{{\raggedright {}}}}}",
-                    escape(&text)
-                )
+                format!(r"\text{{\parbox[t]{{.78\linewidth}}{{\raggedright {text}}}}}")
             }
         }
         other => math_template(node, other, &args(false)?, style)?,
-    })
+    };
+    Ok(colored(body, color, parent, style))
 }
 
 fn math_template(
@@ -578,7 +691,16 @@ fn math_template(
             format!("{operator} ({lower}) ({upper}) (fun {var} => {x})")
         }
         ("0limit", [x, var, point, ..], Latex) if matches!(args.len(), 3 | 4) => {
-            let direction = args.get(3).map_or("", |arg| arg.trim());
+            // This operand is numeric metadata, not printed equation content.
+            let raw_direction = children(node)
+                .nth(3)
+                .map(|child| math_element(child, false, Latex))
+                .transpose()?;
+            let direction = raw_direction
+                .as_deref()
+                .or_else(|| args.get(3).map(String::as_str))
+                .unwrap_or("")
+                .trim();
             let side = match direction.parse::<f64>().ok() {
                 Some(n) if n < 0.0 => "^{-}".to_owned(),
                 Some(n) if n > 0.0 => "^{+}".to_owned(),
@@ -993,6 +1115,143 @@ pub(crate) fn display_unit(token: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COLOR_FORMATS: &str = r#"<formatManager>
+        <formatEntry entryID="black" tc="1" fst="0"/>
+        <formatEntry entryID="white" tc="16777214" fst="1"/>
+        <formatEntry entryID="red" tc="16711680" fst="2"/>
+        <formatEntry entryID="plain" fst="0"/>
+    </formatManager>"#;
+
+    #[test]
+    fn fraction_color_is_independent_of_its_operands() {
+        let source = format!(
+            r#"<r2dtotree>{COLOR_FORMATS}
+            <node name="0el" id0="white"><mbox/>
+              <node name="0el"><node name="0fraction">
+                <node name="0el"><leaf name="0text" id0="black">1</leaf></node>
+                <node name="0el" id0="red"><leaf name="0text">2</leaf></node>
+              </node></node>
+            </node></r2dtotree>"#
+        );
+        let xml = Document::parse(&source).unwrap();
+        let root = xml.root_element();
+        let formats = note_formats(root);
+        let equation = children(root).find(|n| name(*n) == "0el").unwrap();
+        let parts = math_box(equation, MathStyle::Latex, &formats).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0],
+            r"\begingroup\color{white}\frac{\begingroup\color{black}1\endgroup }{\begingroup\color{black}2\endgroup }\endgroup "
+        );
+
+        let lean = math_box(equation, MathStyle::Lean, &formats).unwrap();
+        assert_eq!(
+            lean[0],
+            format!(
+                "{}({}1{} / {}2{}){}",
+                lean::WHITE,
+                lean::BLACK,
+                lean::END_COLOR,
+                lean::BLACK,
+                lean::END_COLOR,
+                lean::END_COLOR
+            )
+        );
+    }
+
+    #[test]
+    fn prose_and_vectors_keep_white_without_leaking_to_the_next_run() {
+        let source = format!(
+            r#"<r2dtotree>{COLOR_FORMATS}
+            <node name="1doc"><node name="1para"><node name="1rtline">
+                <leaf name="1word" id0="white">white &amp; </leaf>
+                <leaf name="1word" id0="red">red </leaf>
+                <leaf name="1word">default </leaf>
+                <leaf name="1vector" id0="white">v</leaf>
+            </node></node></node></r2dtotree>"#
+        );
+        let work = tempfile::tempdir().unwrap();
+        for style in [MathStyle::Latex, MathStyle::Lean] {
+            let mut renderer = Renderer::new(
+                work.path(),
+                ExportOptions {
+                    style,
+                    ..ExportOptions::default()
+                },
+            );
+            let mut tex = String::new();
+            renderer
+                .notes(&Archive(BTreeMap::new()), &source, &mut tex)
+                .unwrap();
+            assert!(tex.contains(r"\textbf{\begingroup\color{white}white \& \endgroup }"));
+            assert!(tex.contains(r"\textit{red }default "));
+            assert!(!tex.contains("16711680"));
+            if style == MathStyle::Latex {
+                assert!(
+                    tex.contains(
+                        r"\notemath{\begingroup\color{white}\overrightarrow{v}\endgroup }"
+                    )
+                );
+            } else {
+                assert!(renderer.expressions[0].starts_with(lean::WHITE));
+            }
+        }
+    }
+
+    #[test]
+    fn colors_inherit_and_every_non_white_color_becomes_black() {
+        let source = format!(
+            r#"<root>{COLOR_FORMATS}<node id0="white">
+            <leaf id0="plain"/><leaf id0="unknown"/><leaf id0="red"/>
+        </node></root>"#
+        );
+        let xml = Document::parse(&source).unwrap();
+        let formats = note_formats(xml.root_element());
+        let colors: Vec<_> = xml
+            .descendants()
+            .filter(|n| n.has_tag_name("leaf"))
+            .map(|n| note_color(n, &formats) == NoteColor::White)
+            .collect();
+        assert_eq!(colors, [true, true, false]);
+        for tc in [
+            "0", "1", "255", "8421504", "16711680", "16777213", "invalid",
+        ] {
+            let source =
+                format!(r#"<root><formatEntry entryID="c" tc="{tc}"/><leaf id0="c"/></root>"#);
+            let xml = Document::parse(&source).unwrap();
+            assert!(
+                note_color(
+                    xml.descendants().find(|n| n.has_tag_name("leaf")).unwrap(),
+                    &note_formats(xml.root_element())
+                ) == NoteColor::Black
+            );
+        }
+    }
+
+    #[test]
+    fn colored_limit_direction_remains_numeric_metadata() {
+        let source = format!(
+            r#"<root>{COLOR_FORMATS}<node name="0limit">
+            <node name="0el"><leaf name="0text">f(x)</leaf></node>
+            <node name="0el"><leaf name="0text">x</leaf></node>
+            <node name="0el"><leaf name="0text">0</leaf></node>
+            <node name="0el" id0="white"><leaf name="0text">-1</leaf></node>
+        </node></root>"#
+        );
+        let xml = Document::parse(&source).unwrap();
+        let root = xml.root_element();
+        let limit = children(root).find(|n| name(*n) == "0limit").unwrap();
+        let rendered = math_element_formatted(
+            limit,
+            false,
+            MathStyle::Latex,
+            &note_formats(root),
+            NoteColor::Black,
+        )
+        .unwrap();
+        assert_eq!(rendered, r"\lim_{x\to 0^{-}} f(x)");
+    }
 
     #[test]
     fn image_size_uses_the_saved_pane_width_with_a_legacy_fallback() {

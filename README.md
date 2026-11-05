@@ -75,6 +75,8 @@ Install Lean 4 on PATH or set LEAN to the absolute path of the Lean executable.
 - Notes prose and math, including fractions, roots, powers, subscripts,
   vectors, matrices, equation systems, piecewise expressions, calculus
   templates, units, conversion operators, and saved calculator results.
+- White and black font colors, including separately colored equation parts.
+  Other font colors are converted to black for print.
 - Embedded BMP, PNG, and JPEG images. The converter reflows Notes for print
   and keeps embedded screenshots as images.
 - Interactive TI-Nspire widgets, including Lua apps, are skipped by default.

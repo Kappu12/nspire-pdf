@@ -3,6 +3,29 @@ use std::{env, fs, path::Path, process::Command};
 
 const FORMATTER: &str = include_str!("format_notes.lean");
 pub const SLOT: char = '\u{1f}';
+// Noncharacters carry nested colors through Lean's fragment formatter without
+// mixing TeX commands into the notation. They are removed before typesetting.
+pub(crate) const BLACK: char = '\u{fdd0}';
+pub(crate) const WHITE: char = '\u{fdd1}';
+pub(crate) const END_COLOR: char = '\u{fdd2}';
+
+fn escape_colored(expression: &str) -> String {
+    let mut output = String::new();
+    let mut start = 0;
+    for (i, ch) in expression.char_indices() {
+        let command = match ch {
+            BLACK => r"{\color{black}",
+            WHITE => r"{\color{white}",
+            END_COLOR => "}",
+            _ => continue,
+        };
+        output.push_str(&crate::latex::escape(&expression[start..i]));
+        output.push_str(command);
+        start = i + ch.len_utf8();
+    }
+    output.push_str(&crate::latex::escape(&expression[start..]));
+    output
+}
 
 pub fn format_document(tex: &str, expressions: &[String], work: &Path) -> Result<String> {
     if expressions.is_empty() {
@@ -46,7 +69,7 @@ pub fn format_document(tex: &str, expressions: &[String], work: &Path) -> Result
     for part in parts {
         let expression = expressions.next().context("missing output from Lean")?;
         output.push_str(r"\texttt{");
-        output.push_str(&crate::latex::escape(expression));
+        output.push_str(&escape_colored(expression));
         output.push('}');
         output.push_str(part);
     }
@@ -120,18 +143,22 @@ pub fn text(input: &str, in_subscript: bool) -> String {
 
 pub fn operand(value: &str) -> String {
     let value = value.trim();
-    let is_atom = value
+    let plain: String = value
+        .chars()
+        .filter(|ch| !matches!(*ch, BLACK | WHITE | END_COLOR))
+        .collect();
+    let is_atom = plain
         .chars()
         .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '%'));
     let mut depth = 0;
-    let is_group = value.starts_with('(')
-        && value.char_indices().all(|(i, ch)| {
+    let is_group = plain.starts_with('(')
+        && plain.char_indices().all(|(i, ch)| {
             match ch {
                 '(' => depth += 1,
                 ')' => depth -= 1,
                 _ => {}
             }
-            depth > 0 || (depth == 0 && i + 1 == value.len())
+            depth > 0 || (depth == 0 && i + 1 == plain.len())
         })
         && depth == 0;
     if is_atom || is_group {
@@ -144,6 +171,18 @@ pub fn operand(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colored_operands_keep_their_grouping_and_escape_literal_tex() {
+        let value = format!("{WHITE}({BLACK}x_1{END_COLOR} / 2){END_COLOR}");
+        assert_eq!(operand(&value), value);
+        assert_eq!(
+            escape_colored(&value),
+            r"{\color{white}({\color{black}x\_1} / 2)}"
+        );
+        let atom = format!("{BLACK}12{END_COLOR}");
+        assert_eq!(operand(&atom), atom);
+    }
 
     #[test]
     fn grouping_keeps_nested_operations_in_order() {
