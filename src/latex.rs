@@ -827,6 +827,7 @@ pub(crate) fn escape(text: &str) -> String {
             '−' => out.push_str(r"\ensuremath{-}"),
             '\u{f000}' => out.push('E'),
             '\u{2009}' => out.push_str(r"\,"),
+            '\u{2005}' => out.push_str(r"\hspace{0.25em}"),
             'ĸ' | 'ŉ' | 'Ŧ' | 'ŧ' | '‣' => {
                 out.push_str(r"\nspiresymbol{");
                 out.push(ch);
@@ -1010,6 +1011,9 @@ fn math_text(text: &str, inside_subscript: bool) -> Result<String> {
                 if token.is_ascii() {
                     write!(out, r"\mathrm{{{token}}}")?;
                 } else {
+                    // U+00B5 and Å are not available in the math font. Use
+                    // Greek mu and the text font's ringed A for these units.
+                    let token = token.replace('µ', "μ").replace('Å', r"\text{\AA}");
                     write!(out, r"\symup{{{token}}}")?;
                 }
             }
@@ -1325,6 +1329,15 @@ mod tests {
             math_text("_c*_h=20.4*_cm", false).unwrap(),
             r"\mathrm{c}\cdot \mathrm{h}=20.4\,\mathrm{cm}"
         );
+    }
+
+    #[test]
+    fn preserves_micro_and_angstrom_units_and_digit_grouping_spaces() {
+        assert_eq!(
+            math_text("5*_µm+2*_Å", false).unwrap(),
+            r"5\,\symup{μm}+2\,\symup{\text{\AA}}"
+        );
+        assert_eq!(escape("123\u{2005}456"), r"123\hspace{0.25em}456");
     }
 
     #[test]
