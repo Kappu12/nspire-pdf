@@ -62,6 +62,14 @@ fn children<'a, 'input>(node: Node<'a, 'input>) -> impl Iterator<Item = Node<'a,
     node.children().filter(Node::is_element)
 }
 
+fn leaf_text(node: Node<'_, '_>) -> String {
+    // TI-Nspire can save a cursor element before or inside a text run.
+    node.children()
+        .filter(Node::is_text)
+        .filter_map(|child| child.text())
+        .collect()
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum NoteColor {
     #[default]
@@ -300,9 +308,9 @@ impl<'a> Renderer<'a> {
             for node in children(para).flat_map(children) {
                 match name(node) {
                     "1word" => {
-                        let word = node.text().unwrap_or("");
+                        let word = leaf_text(node);
                         let body = colored(
-                            escape_note_word(word),
+                            escape_note_word(&word),
                             note_color(node, &formats),
                             NoteColor::Black,
                             MathStyle::Latex,
@@ -321,7 +329,7 @@ impl<'a> Renderer<'a> {
                         }
                     }
                     "1vector" => {
-                        let text = node.text().unwrap_or("");
+                        let text = leaf_text(node);
                         let symbol = text.trim();
                         if !symbol.is_empty() {
                             line.push_str(&escape(&text[..text.len() - text.trim_start().len()]));
@@ -584,11 +592,11 @@ fn math_element_formatted(
     let body = match kind {
         "0el" => args(inside_subscript)?.join(""),
         "0text" | "0paren" => {
-            let text = node.text().unwrap_or("");
+            let text = leaf_text(node);
             if style == MathStyle::Lean {
-                lean::text(text, inside_subscript)
+                lean::text(&text, inside_subscript)
             } else {
-                math_text(text, inside_subscript)?
+                math_text(&text, inside_subscript)?
             }
         }
         "0fraction" => {
@@ -625,11 +633,11 @@ fn math_element_formatted(
                 .descendants()
                 .filter(|n| n.has_tag_name("leaf"))
                 .map(|leaf| {
-                    let text = leaf.text().unwrap_or("");
+                    let text = leaf_text(leaf);
                     let text = if style == MathStyle::Lean {
                         text.replace(char::is_whitespace, " ")
                     } else {
-                        escape(text)
+                        escape(&text)
                     };
                     colored(text, note_color(leaf, formats), color, style)
                 })
@@ -1115,6 +1123,25 @@ pub(crate) fn display_unit(token: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_cursor_does_not_drop_notes_text_or_a_power_base() {
+        let source = r#"<r2dtotree><node name="1doc"><node name="1para"><node name="1rtline">
+            <leaf name="1word">Res<cursor index="3"/>ult: </leaf>
+            <node name="0el"><node name="0el">
+                <leaf name="0text"><cursor index="0"/>2.5*10</leaf>
+                <node name="0power"><node name="0el"><leaf name="0text">6</leaf></node></node>
+                <leaf name="0text">_eV</leaf>
+            </node></node>
+        </node></node></node></r2dtotree>"#;
+        let work = tempfile::tempdir().unwrap();
+        let mut renderer = Renderer::new(work.path(), ExportOptions::default());
+        let mut tex = String::new();
+        renderer
+            .notes(&Archive(BTreeMap::new()), source, &mut tex)
+            .unwrap();
+        assert!(tex.contains(r"Result: \notemath{2.5\cdot 10^{6}\mathrm{eV}}"));
+    }
 
     const COLOR_FORMATS: &str = r#"<formatManager>
         <formatEntry entryID="black" tc="1" fst="0"/>
