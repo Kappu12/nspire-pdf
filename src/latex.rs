@@ -15,6 +15,7 @@ const PREAMBLE: &str = r"\documentclass[11pt,a4paper]{article}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{5pt plus 1pt}
 \setlength{\emergencystretch}{2em}
+\hyphenpenalty=10000
 \setlength{\jot}{5pt}
 \newcommand{\problem}[1]{%
   \Needspace{6\baselineskip}%
