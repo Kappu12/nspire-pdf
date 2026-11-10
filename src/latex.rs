@@ -590,7 +590,37 @@ fn math_element_formatted(
     };
     let kind = name(node);
     let body = match kind {
-        "0el" => args(inside_subscript)?.join(""),
+        "0el" => {
+            let mut output = String::new();
+            let mut previous_ends_in_unicode_subscript = false;
+            for child in children(node) {
+                let value = math_element_formatted(child, inside_subscript, style, formats, color)?;
+                // A TI subscript template can extend a Unicode subscript already
+                // present in the preceding text run (for example Eₖ followed by
+                // a particle label). Keep the entire label in one TeX script.
+                if style == MathStyle::Latex
+                    && !inside_subscript
+                    && name(child) == "0mathSubscript"
+                    && previous_ends_in_unicode_subscript
+                    && output.ends_with('}')
+                    && value.starts_with("_{")
+                {
+                    output.pop();
+                    output.push_str(&value[2..]);
+                } else {
+                    output.push_str(&value);
+                }
+                if !value.is_empty() {
+                    previous_ends_in_unicode_subscript = matches!(name(child), "0text" | "0paren")
+                        && leaf_text(child)
+                            .chars()
+                            .last()
+                            .and_then(decode_subscript)
+                            .is_some();
+                }
+            }
+            output
+        }
         "0text" | "0paren" => {
             let text = leaf_text(node);
             if style == MathStyle::Lean {
@@ -1378,6 +1408,15 @@ mod tests {
         assert_eq!(
             math_element(xml.root_element(), false, MathStyle::Lean).unwrap(),
             "_0"
+        );
+    }
+
+    #[test]
+    fn subscript_template_extends_a_unicode_subscript() {
+        let xml = Document::parse(r#"<node name="0el"><leaf name="0text">E</leaf><node name="0mathSubscript"><node name="0el"><leaf name="0text">Th₂₂₈</leaf></node></node><leaf name="0text">+x</leaf><node name="0mathSubscript"><node name="0el"><leaf name="0text">1</leaf></node></node></node>"#).unwrap();
+        assert_eq!(
+            math_element(xml.root_element(), false, MathStyle::Latex).unwrap(),
+            "E_{kTh228}+x_{1}"
         );
     }
 
